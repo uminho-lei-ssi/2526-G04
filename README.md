@@ -1,8 +1,8 @@
 # Repositório SSI 25/26
 
-- Nº Aluno 1 - Nome Aluno 1 (a preencher)
-- Nº Aluno 2 - Nome Aluno 2 (a preencher)
-- Nº Aluno 3 - Nome Aluno 3 (a preencher)
+- a106877 - José Miguel Fernandes Cação
+- a106918 - Rafael Filipe Duarte de Andrade 
+- a106793 - Lucas André Dias Fernandes
 
 ### Guiões Práticos
 
