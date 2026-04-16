@@ -20,13 +20,15 @@ Aplicação de chat com End-to-End Encryption (E2EE), desenvolvida em Python.
 **1. Iniciar o servidor**
 
 ```bash
-python server.py
+cd server
+python3 main.py
 ```
 
 **2. Ligar um cliente**
 
 ```bash
-python client.py
+cd client
+python3 main.py
 ```
 
 Podem ser abertos múltiplos clientes em simultâneo.
