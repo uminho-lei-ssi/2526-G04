@@ -103,7 +103,7 @@ def _fazer_registo(controller: ClientController) -> bool:
     return False
 
 
-def menu_principal(controller: Client) -> bool:
+def menu_principal(controller: ClientController) -> bool:
     """Returns True to go back to login, False to quit."""
     while True:
         clear()
@@ -121,23 +121,95 @@ def menu_principal(controller: Client) -> bool:
             return False
 
 
-def menu_contactos(controller: Client):
-    contacts = sorted(controller.get_contacts(), key=str.lower)
-
+def menu_contactos(controller: ClientController):
     while True:
         clear()
         header("Contactos")
-        options = contacts + ["<- Voltar"]
+        contacts = sorted(controller.get_contacts(), key=str.lower)
+
+        if contacts:
+            for contact in contacts:
+                print(f"  - {contact}")
+        else:
+            print("  (sem contactos)")
+
+        print()
+        options = [f"Abrir conversa: {name}" for name in contacts]
+        options += ["Adicionar contacto", "Remover contacto", "<- Voltar"]
         choice = prompt_choice(options)
 
-        if choice == len(contacts):
+        if choice < len(contacts):
+            _abrir_conversa(controller, contacts[choice])
+            continue
+
+        base_index = len(contacts)
+        if choice == base_index:
+            _adicionar_contacto(controller)
+            continue
+
+        if choice == base_index + 1:
+            _remover_contacto(controller, contacts)
+            continue
+
+        if choice == base_index + 2:
             return
 
-        _abrir_conversa(contacts[choice])
 
-
-def _abrir_conversa(contact: str):
+def _adicionar_contacto(controller: ClientController):
     clear()
-    header(f"Conversa com {contact}")
-    print("  (conversa ainda não implementada)")
-    input("\n  Enter para voltar...")
+    header("Adicionar contacto")
+    contact = prompt_input("Nome do contacto")
+    if not contact:
+        print("\n  Nome de contacto invalido.")
+        input("\n  Enter para continuar...")
+        return
+
+    _, msg = controller.add_contact(contact)
+    print(f"\n  {msg}")
+    input("\n  Enter para continuar...")
+
+
+def _remover_contacto(controller: ClientController, contacts: list[str]):
+    clear()
+    header("Remover contacto")
+    if not contacts:
+        print("  Nao existem contactos para remover.")
+        input("\n  Enter para continuar...")
+        return
+
+    choice = prompt_choice(contacts + ["Cancelar"])
+    if choice == len(contacts):
+        return
+
+    _, msg = controller.remove_contact(contacts[choice])
+    print(f"\n  {msg}")
+    input("\n  Enter para continuar...")
+
+
+def _abrir_conversa(controller: ClientController, contact: str):
+    while True:
+        clear()
+        header(f"Conversa com {contact}")
+        print("  /voltar para regressar")
+        print()
+
+        messages = controller.fetch_messages(contact)
+        if messages:
+            print("  Novas mensagens:")
+            for item in messages:
+                sender = item.get("from", "?")
+                content = item.get("content", "")
+                print(f"    {sender}: {content}")
+        else:
+            print("  (sem novas mensagens)")
+
+        text = input("\n  Mensagem: ").strip()
+        if text.lower() == "/voltar":
+            return
+        if not text:
+            continue
+
+        ok, msg = controller.send_message(contact, text)
+        if not ok:
+            print(f"\n  {msg}")
+            input("\n  Enter para continuar...")
