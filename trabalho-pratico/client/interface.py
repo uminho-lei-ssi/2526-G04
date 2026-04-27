@@ -1,5 +1,5 @@
 import getpass
-from controller import ClientController
+from client.controller import ClientController
 
 # ---------------------------------------------------------------------------
 # UI helpers
@@ -125,33 +125,29 @@ def menu_contactos(controller: ClientController):
     while True:
         clear()
         header("Contactos")
-        contacts = sorted(controller.get_contacts(), key=str.lower)
-
-        if contacts:
-            for contact in contacts:
-                print(f"  - {contact}")
-        else:
-            print("  (sem contactos)")
-
         print()
-        options = [f"Abrir conversa: {name}" for name in contacts]
-        options += ["Adicionar contacto", "Remover contacto", "<- Voltar"]
+
+        contacts = controller.get_contacts()
+        for contact in contacts:
+            print(f"- {contact}")
+        
+        print()
+        options = ["Abrir conversa", "Adicionar contacto", "Remover contacto", "<- Voltar"]
         choice = prompt_choice(options)
 
-        if choice < len(contacts):
-            _abrir_conversa(controller, contacts[choice])
+        if choice == 0:
+            _abrir_menu_conversa(controller)
             continue
 
-        base_index = len(contacts)
-        if choice == base_index:
+        if choice == 1:
             _adicionar_contacto(controller)
             continue
 
-        if choice == base_index + 1:
-            _remover_contacto(controller, contacts)
+        if choice == 2:
+            _remover_contacto(controller)
             continue
 
-        if choice == base_index + 2:
+        if choice == 3:
             return
 
 
@@ -169,9 +165,33 @@ def _adicionar_contacto(controller: ClientController):
     input("\n  Enter para continuar...")
 
 
-def _remover_contacto(controller: ClientController, contacts: list[str]):
+def _abrir_menu_conversa(controller: ClientController):
+    clear()
+    header("Abrir conversa")
+    print()
+
+    contacts = controller.get_contacts()
+    for contact in contacts:
+        print(f"- {contact}")
+
+    contact = prompt_input("Nome do contacto")
+    if not contact:
+        print("\n  Nome de contacto invalido.")
+        input("\n  Enter para continuar...")
+        return
+
+    if contact not in contacts:
+        print(f"\n  Contacto '{contact}' nao existe.")
+        input("\n  Enter para continuar...")
+        return
+
+    _abrir_conversa(controller, contact)
+
+
+def _remover_contacto(controller: ClientController):
     clear()
     header("Remover contacto")
+    contacts = sorted(controller.get_contacts(), key=str.lower)
     if not contacts:
         print("  Nao existem contactos para remover.")
         input("\n  Enter para continuar...")
@@ -190,7 +210,7 @@ def _abrir_conversa(controller: ClientController, contact: str):
     while True:
         clear()
         header(f"Conversa com {contact}")
-        print("  /voltar para regressar")
+        print("  Pressione enter com mensagem vazia para regressar")
         print()
 
         messages = controller.fetch_messages(contact)
@@ -204,10 +224,8 @@ def _abrir_conversa(controller: ClientController, contact: str):
             print("  (sem novas mensagens)")
 
         text = input("\n  Mensagem: ").strip()
-        if text.lower() == "/voltar":
-            return
         if not text:
-            continue
+            return
 
         ok, msg = controller.send_message(contact, text)
         if not ok:

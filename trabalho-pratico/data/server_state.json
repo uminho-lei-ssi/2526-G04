@@ -1,4 +1,40 @@
 {
-  "users": {},
-  "offline": {}
+  "users": {
+    "a": {
+      "password": {
+        "algorithm": "pbkdf2-sha256",
+        "iterations": 150000,
+        "salt": "gkx1phz1pFWXn0iKKsFk4g==",
+        "hash": "2c8JG9Dpmj8r1RT6wWig7hg/gOsdGCQrlX2FD3ydq1c="
+      },
+      "contacts": [
+        "b"
+      ]
+    },
+    "b": {
+      "password": {
+        "algorithm": "pbkdf2-sha256",
+        "iterations": 150000,
+        "salt": "m3Ys5sPdL3x9yMT3HOfLQQ==",
+        "hash": "Sg9cgQkeSBhybzPVn9d6aE5MBjJhKHaYXSUgO54A4k8="
+      },
+      "contacts": [
+        "a"
+      ]
+    },
+    "c": {
+      "password": {
+        "algorithm": "pbkdf2-sha256",
+        "iterations": 150000,
+        "salt": "wl8OH5gaxfqiz1zJxZSQ/Q==",
+        "hash": "eTYVA/f+2pmbtT9icOj90eP/WvNEVTxJnAZta9LjFNw="
+      },
+      "contacts": []
+    }
+  },
+  "offline": {
+    "a": [],
+    "b": [],
+    "c": []
+  }
 }

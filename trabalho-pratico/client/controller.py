@@ -1,84 +1,62 @@
 import json
-import socket
-import transport as tcp
+from common.security import SecureChannel
 
 
 class ClientController:
-    def __init__(self, sock: socket.socket):
-        self._sock = sock
-
-    # ------------------------------------------------------------------
-    # Acoes chamadas pelo UI — return (ok: bool, message: str)
-    # ------------------------------------------------------------------
+    def __init__(self, ch: SecureChannel):
+        self._ch = ch
 
     def login(self, username: str, password: str) -> tuple[bool, str]:
         ok, message, _ = self._request(
-            {"type": "login", "username": username, "password": password}
+            {"type": "LOGIN", "username": username, "password": password}
         )
         return ok, message
 
     def register(self, username: str, password: str) -> tuple[bool, str]:
         ok, message, _ = self._request(
-            {"type": "register", "username": username, "password": password}
+            {"type": "REGISTER", "username": username, "password": password}
         )
         return ok, message
 
     def logout(self) -> tuple[bool, str]:
-        ok, message, _ = self._request({"type": "logout"})
+        ok, message, _ = self._request({"type": "LOGOUT"})
         return ok, message
 
     def get_contacts(self) -> list[str]:
-        ok, _, data = self._request({"type": "get_contacts"})
+        ok, _, data = self._request({"type": "GET_CONTACTS"})
         if not ok:
             return []
-
-        raw_contacts = data.get("contacts", [])
-        if not isinstance(raw_contacts, list):
-            return []
-
-        return [contact for contact in raw_contacts if isinstance(contact, str)]
+        raw = data.get("contacts", [])
+        return [c for c in raw if isinstance(c, str)]
 
     def add_contact(self, contact: str) -> tuple[bool, str]:
-        ok, message, _ = self._request({"type": "add_contact", "contact": contact})
+        ok, message, _ = self._request({"type": "ADD_CONTACT", "contact": contact})
         return ok, message
 
     def remove_contact(self, contact: str) -> tuple[bool, str]:
-        ok, message, _ = self._request({"type": "remove_contact", "contact": contact})
+        ok, message, _ = self._request({"type": "REMOVE_CONTACT", "contact": contact})
         return ok, message
 
     def send_message(self, recipient: str, content: str) -> tuple[bool, str]:
         ok, message, _ = self._request(
-            {
-                "type": "send_message",
-                "to": recipient,
-                "content": content,
-            }
+            {"type": "SEND_MESSAGE", "to": recipient, "content": content}
         )
         return ok, message
 
     def fetch_messages(self, contact: str | None = None) -> list[dict]:
-        payload: dict = {"type": "fetch_messages"}
+        payload: dict = {"type": "FETCH_MESSAGES"}
         if contact:
             payload["contact"] = contact
-
         ok, _, data = self._request(payload)
         if not ok:
             return []
-
-        raw_messages = data.get("messages", [])
-        if not isinstance(raw_messages, list):
-            return []
-
-        messages: list[dict] = []
-        for item in raw_messages:
-            if isinstance(item, dict):
-                messages.append(item)
-        return messages
+        raw = data.get("messages", [])
+        return [m for m in raw if isinstance(m, dict)]
 
     def _request(self, payload: dict) -> tuple[bool, str, dict]:
         try:
-            tcp.send_msg(self._sock, json.dumps(payload).encode("utf-8"))
-            resp = tcp.recv_msg(self._sock)
+            self._ch.send(json.dumps(payload).encode("utf-8"))
+            resp = self._ch.recv()
         except OSError:
             return False, "Falha de comunicacao com o servidor.", {}
 
@@ -98,8 +76,7 @@ class ClientController:
         data = message.get("data")
         if not isinstance(data, dict):
             data = {}
-
         return ok, text, data
 
     def disconnect(self):
-        self._sock.close()
+        self._ch.close()

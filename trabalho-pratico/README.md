@@ -2,6 +2,8 @@
 
 Aplicação de chat com End-to-End Encryption (E2EE), desenvolvida em Python.
 
+NOTA: security.py está fora de diretoria, fica por se transferir para uma diretoria common com config.ini.
+
 ---
 
 ## Estrutura do projeto
@@ -17,18 +19,19 @@ Aplicação de chat com End-to-End Encryption (E2EE), desenvolvida em Python.
 
 ## Como executar
 
+python3 -m venv .venv
+source .venv/bin/activate
+
 **1. Iniciar o servidor**
 
 ```bash
-cd server
-python3 main.py
+python3 -m server.main
 ```
 
 **2. Ligar um cliente**
 
 ```bash
-cd client
-python3 main.py
+python3 -m client.main
 ```
 
 Podem ser abertos múltiplos clientes em simultâneo.

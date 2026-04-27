@@ -1,31 +1,40 @@
 import configparser
-import transport as tcp
-from controller import ClientController
-import interface as ui
+import common.transport as tcp
+from common.security import SecureChannel
+from client.controller import ClientController
+import client.interface as ui
+
 
 def main():
     config = configparser.ConfigParser()
-    config.read('../config.ini')
-    
+    config.read('common/config.ini')
+
     host = config['SERVER']['address']
     port = config['SERVER'].getint('port')
 
-    # Inicialização dos recursos
     sock = tcp.connect(host, port)
     if sock is None:
+        print("Erro: não foi possível ligar ao servidor.")
         return
-    controller = ClientController(sock)
 
     try:
-        # Passa o controlo total para a UI
+        ch = SecureChannel.client_handshake(sock)
+    except Exception as e:
+        print(f"Erro no handshake: {e}")
+        sock.close()
+        return
+
+    controller = ClientController(ch)
+
+    try:
         ui.start(controller)
     except KeyboardInterrupt:
         pass
     finally:
-        # Garante que o socket fecha independentemente de como a UI terminou
         controller.disconnect()
         ui.clear()
         print("Até logo.\n")
+
 
 if __name__ == "__main__":
     main()

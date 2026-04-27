@@ -1,11 +1,11 @@
 import configparser
-from state import ServerState
-from server import ChatServer
+from server.state import ServerState
+from server.server import ChatServer
 
 def main():
     # 1. Load Configurations
     config = configparser.ConfigParser()
-    config.read('../config.ini')
+    config.read('common/config.ini')
     host = config['SERVER']['address']
     port = config['SERVER'].getint('port')
 
