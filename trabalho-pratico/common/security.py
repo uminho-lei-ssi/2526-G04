@@ -9,20 +9,25 @@ from cryptography.hazmat.primitives.serialization import (
 )
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.hashes import SHA256
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+
+NONCE_SIZE = 12  # 96 bits — tamanho recomendado para AES-GCM
 
 
 class SecureChannel:
     """
-    Canal que mantém apenas o handshake X25519, mas transmite as mensagens em texto simples.
+    Canal seguro com handshake X25519 + encriptação AES-256-GCM por mensagem.
+    Cada mensagem tem um nonce aleatório de 12 bytes prefixado ao ciphertext.
     """
  
-    def __init__(self, sock: socket.socket, keyLength: bytes):
+    def __init__(self, sock: socket.socket, key: bytes):
         """
         Não instanciar directamente — usar client_handshake / server_handshake.
-        key: 32 bytes derivados via HKDF (utilizados apenas no handshake).
+        key: 32 bytes derivados via HKDF, usados para AES-256-GCM.
         """
         self._sock = sock
-        self._key = keyLength
+        self._aesgcm = AESGCM(key)
  
     # -------------------------------------------------------------- #
     # Handshake                                                       #
@@ -37,22 +42,17 @@ class SecureChannel:
           3. Envia a sua chave pública
           4. Deriva chave de sessão via HKDF
         """
-        # Gerar par efemero
         privKey = X25519PrivateKey.generate()
         pub_bytes = privKey.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
  
-        # Receber pubKey do cliente, enviar a nossa
         client_pub_bytes = tcp.recv_raw(sock)
         if not client_pub_bytes or len(client_pub_bytes) != 32:
             raise ConnectionError("Handshake falhou: chave pública do cliente inválida.")
         tcp.send_raw(sock, pub_bytes)
  
-        # Calcular segredo partilhado
         client_pub = X25519PublicKey.from_public_bytes(client_pub_bytes)
         shared_secret = privKey.exchange(client_pub)
  
-        # Derivar chave AES-256 — o contexto "chat-session-key" é um label
-        # arbitrário que garante que esta chave só é usada para este fim
         key = HKDF(
             algorithm=SHA256(),
             length=32,
@@ -71,10 +71,9 @@ class SecureChannel:
           3. Recebe chave pública do servidor
           4. Deriva a mesma chave de sessão via HKDF
         """
-        privKey= X25519PrivateKey.generate()
+        privKey = X25519PrivateKey.generate()
         pub_bytes = privKey.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
  
-        # Enviar a nossa pubKey, receber a do servidor
         tcp.send_raw(sock, pub_bytes)
         server_pub_bytes = tcp.recv_raw(sock)
         if not server_pub_bytes or len(server_pub_bytes) != 32:
@@ -93,21 +92,39 @@ class SecureChannel:
         return cls(sock, key)
  
     # -------------------------------------------------------------- #
-    # Envio e recepção simples                                         #
+    # Envio e recepção com AES-256-GCM                                #
     # -------------------------------------------------------------- #
 
     def send(self, data: bytes):
-        """Envia `data` em texto simples, usando o protocolo de comprimento do transporte."""
-        tcp.send_raw(self._sock, data)
+        """
+        Encripta `data` com AES-256-GCM usando um nonce aleatório e envia:
+            [ 12 bytes nonce ][ ciphertext + 16 bytes tag GCM ]
+        """
+        nonce = os.urandom(NONCE_SIZE)
+        ciphertext = self._aesgcm.encrypt(nonce, data, None)
+        tcp.send_raw(self._sock, nonce + ciphertext)
 
     def recv(self) -> bytes | None:
-        """Recebe uma mensagem em texto simples. Devolve None se a ligação fechou."""
-        return tcp.recv_raw(self._sock)
+        """
+        Recebe uma mensagem, verifica a tag GCM e desencripta.
+        Devolve None se a ligação fechou.
+        Lança ValueError se a autenticação falhar (mensagem corrompida/adulterada).
+        """
+        raw = tcp.recv_raw(self._sock)
+        if raw is None:
+            return None
+
+        if len(raw) < NONCE_SIZE:
+            raise ValueError("Mensagem demasiado curta para conter nonce.")
+
+        nonce = raw[:NONCE_SIZE]
+        ciphertext = raw[NONCE_SIZE:]
+
+        # AESGCM.decrypt lança InvalidTag se a autenticação falhar
+        return self._aesgcm.decrypt(nonce, ciphertext, None)
  
     def close(self):
         try:
             self._sock.close()
         except Exception:
             pass
- 
- 

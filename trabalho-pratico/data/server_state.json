@@ -30,11 +30,29 @@
         "hash": "eTYVA/f+2pmbtT9icOj90eP/WvNEVTxJnAZta9LjFNw="
       },
       "contacts": []
+    },
+    "d": {
+      "password": {
+        "algorithm": "pbkdf2-sha256",
+        "iterations": 150000,
+        "salt": "HBqXQP7YJBanFjHpezfn/A==",
+        "hash": "rZepnzxMkeC6Ri5Bm1QMCQH7H5BwqyToUjsUJBZqaSc="
+      },
+      "contacts": [
+        "a"
+      ]
     }
   },
   "offline": {
-    "a": [],
+    "a": [
+      {
+        "from": "d",
+        "content": "e quê?",
+        "ts": 1777397040
+      }
+    ],
     "b": [],
-    "c": []
+    "c": [],
+    "d": []
   }
 }
