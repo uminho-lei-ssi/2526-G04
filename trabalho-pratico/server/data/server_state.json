@@ -1,0 +1,18 @@
+{
+  "users": {
+    "a": {
+      "password": {
+        "algorithm": "pbkdf2-sha256",
+        "iterations": 150000,
+        "salt": "JPbSzgj1NZRDCXslbRg7pA==",
+        "hash": "WzoTqAoaRWKoIVzgLKgKP9XTYnGD3uuuXjctFe29ML8="
+      },
+      "pub_key": "T5f0guBbgQKruIaqwzYysIak1WC/O0355TkF/21zVus=",
+      "enc_priv": "TmkE0GPR6jOa/v1pWGJSEv+qljH1toG63W5EX4Svbe+v8tiQ22IfjDXujT2w5775FGzO+xLXB6BWxCldKd+GKRr/5IGOoJYxufua1Q==",
+      "contacts": []
+    }
+  },
+  "offline": {
+    "a": []
+  }
+}

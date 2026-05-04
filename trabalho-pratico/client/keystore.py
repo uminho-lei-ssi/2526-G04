@@ -47,6 +47,11 @@ class KeyStore:
     def has_local_keys(self, username: str) -> bool:
         return os.path.exists(self._key_path(username))
 
+    def delete_local_keys(self, username: str):
+        path = self._key_path(username)
+        if os.path.exists(path):
+            os.remove(path)
+
     def generate_and_save(self, username: str, password: str) -> tuple[str, str]:
         """
         Gera par Ed25519, cifra a privada com a password, guarda em disco.

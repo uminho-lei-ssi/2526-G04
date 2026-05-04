@@ -1,4 +1,4 @@
-import hmac
+import base64
 import json
 import os
 import threading
@@ -7,6 +7,7 @@ import time
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives.constant_time import bytes_eq
 
 
 class ServerState:
@@ -286,4 +287,4 @@ class ServerState:
             iterations=iterations,
         )
         got = kdf.derive(password.encode())
-        return hmac.compare_digest(got, expected)
+        return bytes_eq(got, expected)
