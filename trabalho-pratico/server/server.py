@@ -48,7 +48,6 @@ class ClientSession(threading.Thread):
 
         cmd = str(message.get("type", "")).strip().upper()
         handler = handlers.get(cmd)
-
         if handler:
             try:
                 return handler(message)
@@ -57,9 +56,27 @@ class ClientSession(threading.Thread):
         else:
             self._send_response(False, f"ERRO comando desconhecido: {cmd}")
 
+    def _handle_register(self, payload: dict):
+        user     = str(payload.get("username", "")).strip()
+        pwd      = str(payload.get("password", ""))
+        pub_key  = str(payload.get("pub_key",  "")).strip()
+        enc_priv = str(payload.get("enc_priv", "")).strip()
+
+        if not user or not pwd:
+            return self._send_response(False, "ERRO username/password obrigatorios.")
+        if not pub_key or not enc_priv:
+            return self._send_response(False, "ERRO chaves criptograficas obrigatorias.")
+
+        if not self.state.register_user(user, pwd, pub_key, enc_priv):
+            return self._send_response(False, f"ERRO utilizador {user!r} ja existe.")
+
+        print(f"  Registado: {user}")
+        self._send_response(True, f"OK utilizador {user!r} registado.")
+
     def _handle_login(self, payload: dict):
         user = str(payload.get("username", "")).strip()
-        pwd = str(payload.get("password", ""))
+        pwd  = str(payload.get("password", ""))
+
         if not user or not pwd:
             return self._send_response(False, "ERRO username/password obrigatorios.")
         if self.username:
@@ -68,19 +85,13 @@ class ClientSession(threading.Thread):
             return self._send_response(False, "ERRO credenciais invalidas.")
         if not self.state.login_user(user, self):
             return self._send_response(False, "ERRO sessao ja ativa.")
+
         self.username = user
         print(f"  Login: {user}")
-        self._send_response(True, f"OK bem-vindo, {user}!")
 
-    def _handle_register(self, payload: dict):
-        user = str(payload.get("username", "")).strip()
-        pwd = str(payload.get("password", ""))
-        if not user or not pwd:
-            return self._send_response(False, "ERRO username/password obrigatorios.")
-        if not self.state.register_user(user, pwd):
-            return self._send_response(False, f"ERRO utilizador {user!r} ja existe.")
-        print(f"  Registado: {user}")
-        self._send_response(True, f"OK utilizador {user!r} registado.")
+        # Devolver as chaves ao cliente após autenticação bem-sucedida
+        bundle = self.state.get_key_bundle(user)
+        self._send_response(True, f"OK bem-vindo, {user}!", bundle)
 
     def _handle_logout(self, message=None):
         name = self.username or "?"
@@ -102,6 +113,7 @@ class ClientSession(threading.Thread):
         if not contact:
             return self._send_response(False, "ERRO contacto obrigatorio.")
         ok, message = self.state.add_contact(self.username, contact)
+        self.state.add_contact(contact, self.username) # adicionar pessoa implica user ser adicionado ao contacto da mesma
         self._send_response(ok, message)
 
     def _handle_remove_contact(self, payload: dict):
@@ -117,7 +129,7 @@ class ClientSession(threading.Thread):
         if not self._ensure_authenticated():
             return
         recipient = str(payload.get("to", "")).strip()
-        content = str(payload.get("content", ""))
+        content   = str(payload.get("content", ""))
         if not recipient:
             return self._send_response(False, "ERRO destinatario obrigatorio.")
         if not content.strip():
@@ -132,10 +144,9 @@ class ClientSession(threading.Thread):
         if not self._ensure_authenticated():
             return
         contact_value = payload.get("contact")
-        contact = None
-        if isinstance(contact_value, str):
-            contact = contact_value.strip() or None
-        messages = self.state.pop_messages(self.username, contact)
+        if isinstance(contact_value, str): contact = contact_value.strip() 
+        else: contact = None
+        messages = self.state.pop_messages(self.username, contact or None)
         self._send_response(True, "OK mensagens obtidas.", {"messages": messages})
 
     def _ensure_authenticated(self) -> bool:

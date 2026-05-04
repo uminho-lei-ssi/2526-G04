@@ -12,12 +12,12 @@ from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
-NONCE_SIZE = 12  # 96 bits — tamanho recomendado para AES-GCM
+NONCE_SIZE = 12  # 96 bits - tamanho recomendado para AES-GCM
 
 
 class SecureChannel:
     """
-    Canal seguro com handshake X25519 + encriptação AES-256-GCM por mensagem.
+    Canal seguro server-client com handshake X25519 + encriptação AES-256-GCM por mensagem.
     Cada mensagem tem um nonce aleatório de 12 bytes prefixado ao ciphertext.
     """
  

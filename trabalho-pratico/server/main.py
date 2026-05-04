@@ -5,14 +5,14 @@ from server.server import ChatServer
 def main():
     # 1. Load Configurations
     config = configparser.ConfigParser()
-    config.read('common/config.ini')
+    config.read('server/config.ini')
     host = config['SERVER']['address']
     port = config['SERVER'].getint('port')
 
-    # 2. Initialize Seerver State (Business Logic)
+    # 2. Initialize Server State
     state = ServerState()
 
-    # 3. Initialize and Start the Server's socket and accept loop (Network-side)
+    # 3. Initialize and Start the Server's accept loop (network)
     server = ChatServer(host, port, state)
     server.start()
 

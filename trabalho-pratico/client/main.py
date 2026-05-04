@@ -1,16 +1,24 @@
 import configparser
+import os
 import common.transport as tcp
 from common.security import SecureChannel
 from client.controller import ClientController
+from client.keystore import KeyStore
 import client.interface as ui
 
 
 def main():
     config = configparser.ConfigParser()
-    config.read('common/config.ini')
+    config_path = os.path.join(os.path.dirname(__file__), 'config.ini')
+    config.read(config_path)
 
     host = config['SERVER']['address']
     port = config['SERVER'].getint('port')
+
+    keys_dir = config['KEYSTORE'].get('keys_dir', 'data/keys')
+    if not os.path.isabs(keys_dir):
+        project_root = os.path.dirname(os.path.dirname(__file__))
+        keys_dir = os.path.join(project_root, keys_dir)
 
     sock = tcp.connect(host, port)
     if sock is None:
@@ -24,7 +32,7 @@ def main():
         sock.close()
         return
 
-    controller = ClientController(ch)
+    controller = ClientController(ch, KeyStore(keys_dir))
 
     try:
         ui.start(controller)
