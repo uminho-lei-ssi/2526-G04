@@ -1,13 +1,11 @@
 import json
 import socket
 import threading
-from common.security import SecureChannel
+from common.secureChannel import SecureChannel
 from server.state import ServerState
 
 
 class ClientSession(threading.Thread):
-    """Handles the lifecycle of a single connected client."""
-
     def __init__(self, ch: SecureChannel, addr, state: ServerState):
         super().__init__(daemon=True)
         self.ch, self.addr, self.state = ch, addr, state
@@ -40,6 +38,7 @@ class ClientSession(threading.Thread):
             "LOGIN":          self._handle_login,
             "LOGOUT":         self._handle_logout,
             "GET_CONTACTS":   self._handle_get_contacts,
+            "GET_PUB_KEY":    self._handle_get_pub_key,
             "ADD_CONTACT":    self._handle_add_contact,
             "REMOVE_CONTACT": self._handle_remove_contact,
             "SEND_MESSAGE":   self._handle_send_message,
@@ -66,7 +65,6 @@ class ClientSession(threading.Thread):
             return self._send_response(False, "ERRO username/password obrigatorios.")
         if not pub_key or not enc_priv:
             return self._send_response(False, "ERRO chaves criptograficas obrigatorias.")
-
         if not self.state.register_user(user, pwd, pub_key, enc_priv):
             return self._send_response(False, f"ERRO utilizador {user!r} ja existe.")
 
@@ -88,8 +86,6 @@ class ClientSession(threading.Thread):
 
         self.username = user
         print(f"  Login: {user}")
-
-        # Devolver as chaves ao cliente após autenticação bem-sucedida
         bundle = self.state.get_key_bundle(user)
         self._send_response(True, f"OK bem-vindo, {user}!", bundle)
 
@@ -106,15 +102,39 @@ class ClientSession(threading.Thread):
         contacts = self.state.get_contacts(self.username)
         self._send_response(True, "OK lista de contactos.", {"contacts": contacts})
 
+    def _handle_get_pub_key(self, payload: dict):
+        if not self._ensure_authenticated():
+            return
+        target = str(payload.get("username", "")).strip()
+        if not target:
+            return self._send_response(False, "ERRO username obrigatorio.")
+        pub_key = self.state.get_pub_key(target)
+        if not pub_key:
+            return self._send_response(False, f"ERRO utilizador '{target}' nao existe.")
+        self._send_response(True, "OK chave publica obtida.", {"pub_key": pub_key})
+
     def _handle_add_contact(self, payload: dict):
         if not self._ensure_authenticated():
             return
-        contact = str(payload.get("contact", "")).strip()
+        contact             = str(payload.get("contact", "")).strip()
+        enc_key_for_contact = str(payload.get("enc_key_for_contact", "")).strip()
+
         if not contact:
             return self._send_response(False, "ERRO contacto obrigatorio.")
+        if not enc_key_for_contact:
+            return self._send_response(False, "ERRO chave cifrada obrigatoria.")
+
         ok, message = self.state.add_contact(self.username, contact)
-        self.state.add_contact(contact, self.username) # adicionar pessoa implica user ser adicionado ao contacto da mesma
-        self._send_response(ok, message)
+        if not ok:
+            return self._send_response(ok, message)
+
+        # Guardar chave cifrada para entregar ao contact quando fizer fetch
+        self.state.store_pending_key(contact, self.username, enc_key_for_contact)
+
+        # Adicionar reciprocamente
+        self.state.add_contact(contact, self.username)
+
+        self._send_response(True, message)
 
     def _handle_remove_contact(self, payload: dict):
         if not self._ensure_authenticated():
@@ -144,10 +164,13 @@ class ClientSession(threading.Thread):
         if not self._ensure_authenticated():
             return
         contact_value = payload.get("contact")
-        if isinstance(contact_value, str): contact = contact_value.strip() 
-        else: contact = None
-        messages = self.state.pop_messages(self.username, contact or None)
-        self._send_response(True, "OK mensagens obtidas.", {"messages": messages})
+        contact = contact_value.strip() if isinstance(contact_value, str) else None
+        messages     = self.state.pop_messages(self.username, contact or None)
+        pending_keys = self.state.pop_pending_keys(self.username)
+        self._send_response(True, "OK mensagens obtidas.", {
+            "messages":     messages,
+            "pending_keys": pending_keys,
+        })
 
     def _ensure_authenticated(self) -> bool:
         if self.username:

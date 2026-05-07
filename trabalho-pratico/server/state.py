@@ -11,23 +11,21 @@ from cryptography.hazmat.primitives.constant_time import bytes_eq
 
 
 class ServerState:
-    """Manages the server state: users, online sessions and offline messages."""
-
     def __init__(self):
-        self._data_path = "server/data/server_state.json"
-
-        self._key_path  = os.path.join(os.path.dirname(self._data_path), "server.key")
+        self._data_path   = "server/data/server_state.json"
+        self._key_path    = os.path.join(os.path.dirname(self._data_path), "storage.key")
         self._storage_key = self._load_or_create_key()
 
-        self._users:   dict[str, dict]       = {}
-        self._online:  dict[str, object]     = {}
-        self._offline: dict[str, list[dict]] = {}
+        self._users:        dict[str, dict]            = {}
+        self._online:       dict[str, object]          = {}
+        self._offline:      dict[str, list[dict]]      = {}
+        self._pending_keys: dict[str, dict[str, str]]  = {}
 
         self._lock = threading.Lock()
         self._load_from_disk()
 
     # ------------------------------------------------------------------ #
-    # Chave de armazenamento (mensagens offline)                         #
+    # Chave de armazenamento offline                                      #
     # ------------------------------------------------------------------ #
 
     def _load_or_create_key(self) -> bytes:
@@ -46,12 +44,12 @@ class ServerState:
         return base64.b64encode(nonce + ct).decode()
 
     def _decrypt_message(self, encrypted: str) -> str:
-        raw   = base64.b64decode(encrypted)
-        nonce, ct = raw[:12], raw[12:]
+        raw        = base64.b64decode(encrypted)
+        nonce, ct  = raw[:12], raw[12:]
         return AESGCM(self._storage_key).decrypt(nonce, ct, None).decode()
 
     # ------------------------------------------------------------------ #
-    # API pública                                                        #
+    # API pública                                                         #
     # ------------------------------------------------------------------ #
 
     def register_user(self, username: str, password: str,
@@ -61,11 +59,12 @@ class ServerState:
                 return False
             self._users[username] = {
                 "password": self._hash_password(password),
-                "pub_key":  pub_key,   # chave pública Ed25519 em base64
-                "enc_priv": enc_priv,  # chave privada cifrada pelo cliente em base64
+                "pub_key":  pub_key,
+                "enc_priv": enc_priv,
                 "contacts": set(),
             }
-            self._offline[username] = []
+            self._offline[username]      = []
+            self._pending_keys[username] = {}
             self._persist_locked()
             return True
 
@@ -80,18 +79,13 @@ class ServerState:
             return self._verify_password(password, stored)
 
     def get_key_bundle(self, username: str) -> dict | None:
-        """Devolve pub_key e enc_priv para entregar ao cliente após login."""
         with self._lock:
             user = self._users.get(username)
             if not user:
                 return None
-            return {
-                "pub_key":  user.get("pub_key", ""),
-                "enc_priv": user.get("enc_priv", ""),
-            }
+            return {"pub_key": user.get("pub_key", ""), "enc_priv": user.get("enc_priv", "")}
 
     def get_pub_key(self, username: str) -> str | None:
-        """Devolve a chave pública."""
         with self._lock:
             user = self._users.get(username)
             return user.get("pub_key") if user else None
@@ -144,6 +138,19 @@ class ServerState:
             self._persist_locked()
             return True, f"OK contacto {contact!r} removido."
 
+    def store_pending_key(self, recipient: str, sender: str, enc_key_blob: str):
+        with self._lock:
+            self._pending_keys.setdefault(recipient, {})[sender] = enc_key_blob
+            self._persist_locked()
+
+    def pop_pending_keys(self, username: str) -> dict[str, str]:
+        with self._lock:
+            keys = dict(self._pending_keys.get(username, {}))
+            self._pending_keys[username] = {}
+            if keys:
+                self._persist_locked()
+            return keys
+
     def queue_message(self, sender: str, recipient: str, content: str) -> tuple[bool, str]:
         with self._lock:
             if sender not in self._users:
@@ -153,9 +160,7 @@ class ServerState:
             if not content:
                 return False, "ERRO mensagem vazia."
             self._offline[recipient].append({
-                "from":    sender,
-                "content": content,
-                "ts":      int(time.time()),
+                "from": sender, "content": content, "ts": int(time.time()),
             })
             self._persist_locked()
             return True, "OK mensagem enfileirada."
@@ -200,8 +205,11 @@ class ServerState:
             ]
 
         with open(self._data_path, "w", encoding="utf-8") as f:
-            json.dump({"users": serializable_users, "offline": serializable_offline},
-                      f, ensure_ascii=False, indent=2)
+            json.dump({
+                "users":        serializable_users,
+                "offline":      serializable_offline,
+                "pending_keys": self._pending_keys,
+            }, f, ensure_ascii=False, indent=2)
 
     def _load_from_disk(self):
         if not os.path.exists(self._data_path):
@@ -212,8 +220,10 @@ class ServerState:
         except (OSError, json.JSONDecodeError):
             return
 
-        users   = payload.get("users", {})
-        offline = payload.get("offline", {})
+        users        = payload.get("users", {})
+        offline      = payload.get("offline", {})
+        pending_keys = payload.get("pending_keys", {})
+
         if not isinstance(users, dict) or not isinstance(offline, dict):
             return
 
@@ -246,6 +256,12 @@ class ServerState:
         for username in self._users:
             self._offline.setdefault(username, [])
 
+        for username, keys in pending_keys.items():
+            if isinstance(keys, dict):
+                self._pending_keys[username] = keys
+        for username in self._users:
+            self._pending_keys.setdefault(username, {})
+
     # ------------------------------------------------------------------ #
     # Passwords                                                           #
     # ------------------------------------------------------------------ #
@@ -253,12 +269,7 @@ class ServerState:
     def _hash_password(self, password: str) -> dict:
         salt = os.urandom(16)
         iterations = 150_000
-        kdf = PBKDF2HMAC(
-            algorithm=hashes.SHA256(),
-            length=32,
-            salt=salt,
-            iterations=iterations,
-        )
+        kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=iterations)
         digest = kdf.derive(password.encode())
         return {
             "algorithm":  "pbkdf2-sha256",
@@ -280,11 +291,6 @@ class ServerState:
             expected = base64.b64decode(hash_b64)
         except (ValueError, TypeError):
             return False
-        kdf = PBKDF2HMAC(
-            algorithm=hashes.SHA256(),
-            length=32,
-            salt=salt,
-            iterations=iterations,
-        )
+        kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=iterations)
         got = kdf.derive(password.encode())
         return bytes_eq(got, expected)

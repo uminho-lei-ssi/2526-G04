@@ -1,18 +1,18 @@
 import json
+import os
 
-from common.security import SecureChannel
-from client import keystore
+from common.secureChannel import SecureChannel
+from client.keystore import KeyStore
 
 
 class ClientController:
-    def __init__(self, ch: SecureChannel, keystore: keystore.KeyStore):
+    def __init__(self, ch: SecureChannel, keystore: KeyStore):
         self._ch = ch
         self._username: str | None = None
-        self._priv_key = None  # Ed25519PrivateKey em memória após login
+        self._priv_key = None  # X25519PrivateKey em memória após login
         self._keystore = keystore
 
     def register(self, username: str, password: str) -> tuple[bool, str]:
-        # Gerar par de chaves localmente
         try:
             pub_b64, enc_priv_b64 = self._keystore.generate_and_save(username, password)
         except Exception as e:
@@ -27,7 +27,6 @@ class ClientController:
         })
 
         if not ok:
-            # Reverter chaves locais se o servidor recusou
             self._keystore.delete_local_keys(username)
 
         return ok, message
@@ -42,7 +41,6 @@ class ClientController:
         if not ok:
             return ok, message
 
-        # Servidor devolveu as chaves — guardar/actualizar localmente e decifrar
         pub_b64      = data.get("pub_key", "")
         enc_priv_b64 = data.get("enc_priv", "")
 
@@ -71,7 +69,30 @@ class ClientController:
         return [c for c in data.get("contacts", []) if isinstance(c, str)]
 
     def add_contact(self, contact: str) -> tuple[bool, str]:
-        ok, message, _ = self._request({"type": "ADD_CONTACT", "contact": contact})
+        # Pedir chave pública do contacto ao servidor
+        ok, _, data = self._request({"type": "GET_PUB_KEY", "username": contact})
+        if not ok:
+            return False, f"Não foi possível obter a chave pública de '{contact}'."
+
+        contact_pub_b64 = data.get("pub_key", "")
+        if not contact_pub_b64:
+            return False, f"Servidor não devolveu chave pública de '{contact}'."
+
+        # Gerar chave simétrica, guardar para o owner e obter blob cifrado para o contact
+        try:
+            enc_for_contact = self._keystore.generate_contact_key(
+                self._username, contact, contact_pub_b64, self._priv_key
+            )
+        except Exception as e:
+            return False, f"Erro ao gerar chave de contacto: {e}"
+
+        # Pedir ao server para registar contacto e enviar depois a chave cifrada para o contacto
+        ok, message, _ = self._request({
+            "type":                "ADD_CONTACT",
+            "contact":             contact,
+            "enc_key_for_contact": enc_for_contact,
+        })
+
         return ok, message
 
     def remove_contact(self, contact: str) -> tuple[bool, str]:

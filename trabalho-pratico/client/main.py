@@ -1,7 +1,7 @@
 import configparser
 import os
 import common.transport as tcp
-from common.security import SecureChannel
+from common.secureChannel import SecureChannel
 from client.controller import ClientController
 from client.keystore import KeyStore
 import client.interface as ui
