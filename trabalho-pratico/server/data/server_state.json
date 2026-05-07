@@ -28,19 +28,14 @@
     }
   },
   "offline": {
-    "a": [
+    "a": [],
+    "b": [
       {
-        "from": "b",
-        "content": "jxHhV18bYt2YPrDlTxJPQIyoJDiTxQ8mqTuuiznnsRg=",
-        "ts": 1778152064
-      },
-      {
-        "from": "b",
-        "content": "yix9jxHMa+TQqTHoHyMPWZOcazjjx1swTWxiCAvvUw==",
-        "ts": 1778152067
+        "from": "a",
+        "content": "M3N+TWZ5ZzQgWnYr37omUclhCUqySki4HRSWlJ7CwcZmNbaf",
+        "ts": 1778152968
       }
-    ],
-    "b": []
+    ]
   },
   "pending_keys": {
     "a": {},

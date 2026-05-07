@@ -13,8 +13,6 @@ from cryptography.hazmat.primitives.constant_time import bytes_eq
 class ServerState:
     def __init__(self):
         self._data_path   = "server/data/server_state.json"
-        self._key_path    = os.path.join(os.path.dirname(self._data_path), "storage.key")
-        self._storage_key = self._load_or_create_key()
 
         self._users:        dict[str, dict]            = {}
         self._online:       dict[str, object]          = {}
@@ -23,30 +21,6 @@ class ServerState:
 
         self._lock = threading.Lock()
         self._load_from_disk()
-
-    # ------------------------------------------------------------------ #
-    # Chave de armazenamento offline                                      #
-    # ------------------------------------------------------------------ #
-
-    def _load_or_create_key(self) -> bytes:
-        os.makedirs(os.path.dirname(self._key_path), exist_ok=True)
-        if os.path.exists(self._key_path):
-            with open(self._key_path, "rb") as f:
-                return f.read()
-        key = os.urandom(32)
-        with open(self._key_path, "wb") as f:
-            f.write(key)
-        return key
-
-    def _encrypt_message(self, content: str) -> str:
-        nonce = os.urandom(12)
-        ct    = AESGCM(self._storage_key).encrypt(nonce, content.encode(), None)
-        return base64.b64encode(nonce + ct).decode()
-
-    def _decrypt_message(self, encrypted: str) -> str:
-        raw        = base64.b64decode(encrypted)
-        nonce, ct  = raw[:12], raw[12:]
-        return AESGCM(self._storage_key).decrypt(nonce, ct, None).decode()
 
     # ------------------------------------------------------------------ #
     # API pública                                                         #
@@ -200,7 +174,7 @@ class ServerState:
         serializable_offline = {}
         for username, messages in self._offline.items():
             serializable_offline[username] = [
-                {"from": m["from"], "content": self._encrypt_message(m["content"]), "ts": m["ts"]}
+                {"from": m["from"], "content": (m["content"]), "ts": m["ts"]}
                 for m in messages
             ]
 
@@ -242,16 +216,16 @@ class ServerState:
         for username, messages in offline.items():
             if not isinstance(username, str) or not isinstance(messages, list):
                 continue
-            decrypted = []
+            res = []
             for m in messages:
                 if not isinstance(m, dict):
                     continue
                 try:
-                    content = self._decrypt_message(m["content"])
+                    content = (m["content"])
                 except Exception:
                     continue
-                decrypted.append({"from": m["from"], "content": content, "ts": m["ts"]})
-            self._offline[username] = decrypted
+                res.append({"from": m["from"], "content": content, "ts": m["ts"]})
+            self._offline[username] = res
 
         for username in self._users:
             self._offline.setdefault(username, [])
