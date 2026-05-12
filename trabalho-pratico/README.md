@@ -2,7 +2,45 @@
 
 Aplicação de chat segura cliente-servidor com registo, autenticação, gestão de contactos e mensagens offline.
 
-NOTA: Handshake X25519 com derivação HKDF; após handshake, mensagens em plaintext por agora.
+NOTA: Por atualizar no que toca a features e arquitetura etc.
+
+## TODO's
+- interrupt no processo apagar credenciais de user do sistema local como em logout (improve) (registo tambem permite deixar credenciais por apagar no sistema porque nao da login automatico, ou nao escrever logo ou fazer login)
+- Logistica:
+    - pôr dados em pastas dedicadas por user? (fornece meta info, portanto sus, acho que nao é preciso)
+    - neste momento server recusa segunda sessao para mesmo cliente, poderia fechar a antiga mas envolvia refazer chaves TODAS etc. provavelmente, improve para depois
+      - imagino que isto influenciaria a geração do nonce para os contactos de cada user (que nao deve ser reutilizado)
+    - colocar mensagens mostradas tipo 10/20 de cada vez e depois trocar pagina etc.
+    - sair de conversa leva a menu contactos em vez de abrir conversa, podia ser assim…?
+    - colocar contactos com mensagens novas acima
+    - mostrar contactos da mesma forma
+    - colocar process_contact_keys aquando aceitar novo contacto, nao automatico, senao flood no cliente
+    - colocar limite no tempo de tentativas de login para atenuar bruteforce
+    - colocar requisitos de segurança na pass
+    - alterar password?
+    - apagar conta?
+- estado do cliente:
+    - faz sentido guardar historico com TUDO cifrado incluindo metadados ig
+        - nome do ficheiro tambem ig
+    - registar nao faz login mas guarda credenciais
+- estado do server:
+    - encriptar lista de contactos
+- confirmar se mais parametros devem residir em config.ini
+- tecnicamente fetch historico de mensagens podia ser mais otimizado para nao guardar e pegar no que acabou de guardar
+
+
+## Features por Implementar
+
+- Grupos
+   - ja temos chaves simetricas entre users, era abranger o protocolo a grupos com UI e etc.
+- Mensagens Offline
+   - funciona ig
+- P2P
+   - nada
+- Forward Secrecy
+   - já temos chaves cifradas, envolveria so manter mais delas ig
+- PKI
+   - falta fazer servidor (autenticar-se e aos seus users?) como entidade de certificação
 
 ---
 
