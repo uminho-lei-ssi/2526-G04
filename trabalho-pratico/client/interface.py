@@ -1,4 +1,5 @@
 import getpass
+from datetime import datetime
 from client.controller import ClientController
 
 # ---------------------------------------------------------------------------
@@ -207,27 +208,29 @@ def _remover_contacto(controller: ClientController):
 
 
 def _abrir_conversa(controller: ClientController, contact: str):
-    while True:
-        clear()
-        header(f"Conversa com {contact}")
-        print("  Pressione enter com mensagem vazia para regressar")
-        print()
-
-        messages = controller.fetch_messages(contact)
-        if messages:
-            print("  Novas mensagens:")
-            for item in messages:
-                sender = item.get("from", "?")
-                content = item.get("content", "")
-                print(f"    {sender}: {content}")
-        else:
-            print("  (sem novas mensagens)")
-
-        text = input("\n  Mensagem: ").strip()
-        if not text:
-            return
-
-        ok, msg = controller.send_message(contact, text)
-        if not ok:
-            print(f"\n  {msg}")
-            input("\n  Enter para continuar...")
+        while True:
+            clear()
+            header(f"Conversa com {contact}")
+            print("  Pressione enter com mensagem vazia para regressar")
+            print()
+ 
+            messages = controller.fetch_messages(contact)
+            if messages:
+                for item in messages:
+                    sender  = item.get("from", "?")
+                    content = item.get("content", "")
+                    ts      = item.get("ts", 0)
+                    time_str = datetime.fromtimestamp(ts).strftime("%d/%m %H:%M")
+                    print(f"    [{time_str}] {sender}: {content}")
+            else:
+                print("  (sem mensagens)")
+ 
+            text = input("\n  Mensagem: ").strip()
+            if not text:
+                return
+ 
+            ok, msg = controller.send_message(contact, text)
+            if not ok:
+                print(f"\n  {msg}")
+                input("\n  Enter para continuar...")
+ 

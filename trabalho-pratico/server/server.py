@@ -117,22 +117,24 @@ class ClientSession(threading.Thread):
         if not self._ensure_authenticated():
             return
         contact             = str(payload.get("contact", "")).strip()
+        enc_key_for_owner = str(payload.get("enc_key_for_owner", "")).strip()
         enc_key_for_contact = str(payload.get("enc_key_for_contact", "")).strip()
 
         if not contact:
             return self._send_response(False, "ERRO contacto obrigatorio.")
+        if not enc_key_for_owner:
+            return self._send_response(False, "ERRO chave cifrada do owner obrigatoria.")
         if not enc_key_for_contact:
-            return self._send_response(False, "ERRO chave cifrada obrigatoria.")
+            return self._send_response(False, "ERRO chave cifrada do contacto obrigatoria.")
 
         ok, message = self.state.add_contact(self.username, contact)
         if not ok:
             return self._send_response(ok, message)
-
-        # Guardar chave cifrada para entregar ao contact quando fizer fetch
-        self.state.store_pending_key(contact, self.username, enc_key_for_contact)
-
         # Adicionar reciprocamente
         self.state.add_contact(contact, self.username)
+
+        # Guardar chave cifrada para entregar ao contact ou owner
+        self.state.store_contact_key(contact, self.username, enc_key_for_owner, enc_key_for_contact)
 
         self._send_response(True, message)
 
@@ -166,10 +168,10 @@ class ClientSession(threading.Thread):
         contact_value = payload.get("contact")
         contact = contact_value.strip() if isinstance(contact_value, str) else None
         messages     = self.state.pop_messages(self.username, contact or None)
-        pending_keys = self.state.pop_pending_keys(self.username)
+        contact_keys = self.state.pop_contact_keys(self.username)
         self._send_response(True, "OK mensagens obtidas.", {
             "messages":     messages,
-            "pending_keys": pending_keys,
+            "contact_keys": contact_keys,
         })
 
     def _ensure_authenticated(self) -> bool:

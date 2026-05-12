@@ -127,13 +127,46 @@ class KeyStore:
             return base64.b64decode(json.load(f)["pub"])
 
     # ------------------------------------------------------------------ #
-    # Chaves de contactos                                                 #
+    # Chaves de contactos                                                #
     # ------------------------------------------------------------------ #
 
+    def receive_contact_key(self, owner: str, sender: str,
+                             enc_blob_b64: str, owner_priv: X25519PrivateKey):
+        """
+        Decifra a chave simétrica enviada por `sender` e guarda localmente.
+        enc_blob = base64(eph_pub[32] + nonce[12] + enc_key)
+        """
+        raw      = base64.b64decode(enc_blob_b64)
+        eph_pub  = X25519PublicKey.from_public_bytes(raw[:32])
+        nonce    = raw[32:44]
+        enc_key  = raw[44:]
+ 
+        shared  = owner_priv.exchange(eph_pub)
+        aes_key = HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
+                       info=b"contact-key-exchange").derive(shared)
+ 
+        sym_key = AESGCM(aes_key).decrypt(nonce, enc_key, None)
+        self.save_contact_key(owner, sender, sym_key, owner_priv)
+
+    def receive_owner_key(self, owner: str, contact_name: str,
+                             blob: str, owner_priv: X25519PrivateKey):
+        """
+        Decifra chave simétrica de quem adicionou o contacto e guarda localmente.
+        """
+        aes_key_storage = self._derive_key_from_priv(owner_priv)
+        raw = base64.b64decode(blob)
+        nonce, enc_key = raw[:12], raw[12:]
+        sym_key = AESGCM(aes_key_storage).decrypt(nonce, enc_key, None)
+                    
+        self.save_contact_key(
+            owner, contact_name, sym_key, owner_priv
+        )
+
     def save_contact_key(self, owner: str, contact: str,
-                         sym_key: bytes, owner_priv: X25519PrivateKey):
+                         sym_key: bytes, owner_priv: X25519PrivateKey) -> str:
         """
         Cifra sym_key com AES-GCM usando chave derivada da priv do owner e guarda em disco.
+        Devolve o blob cifrado.
         Formato: { contact: { nonce: b64, enc_key: b64 } }
         """
         aes_key = self._derive_key_from_priv(owner_priv)
@@ -152,6 +185,8 @@ class KeyStore:
         }
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
+
+        return base64.b64encode(nonce + enc_key).decode()
 
     def get_contact_key(self, owner: str, contact: str,
                         owner_priv: X25519PrivateKey) -> bytes | None:
@@ -178,32 +213,30 @@ class KeyStore:
 
     def generate_contact_key(self, owner: str, contact: str,
                               contact_pub_b64: str,
-                              owner_priv: X25519PrivateKey) -> str:
+                              owner_priv: X25519PrivateKey) -> tuple[str,str]:
         """
         Gera chave AES-256 para comunicação com `contact`.
         1. Guarda-a cifrada com chave derivada da priv do owner (para o owner recuperar depois)
         2. Cifra-a com a pub_key do contact via ECDH para enviar ao servidor
            O contact decifra com a sua priv quando receber.
 
-        Devolve (sym_key_plaintext, enc_for_contact_b64).
+        Devolve (enc_for_contact, enc_for_self).
         enc_for_contact = base64(eph_pub[32] + nonce[12] + enc_key)
         """
         sym_key = os.urandom(32)
 
         # Guardar para o owner
-        self.save_contact_key(owner, contact, sym_key, owner_priv)
+        enc_for_self = self.save_contact_key(owner, contact, sym_key, owner_priv)
 
         # Cifrar para o contact: ECDH entre chave efemera e pub do contact
-        print("boas")
         contact_pub = X25519PublicKey.from_public_bytes(base64.b64decode(contact_pub_b64))
-        print("boas2")
         eph_priv    = X25519PrivateKey.generate()
         eph_pub     = eph_priv.public_key()
         shared  = eph_priv.exchange(contact_pub)
 
         # Como o protocolo não permite cifrar com a chave publica do contacto diretamente
         # temos de derivar uma chave AES com um shared por DH para cifrar
-        # o contacto pode entao recalcular shared e derivar a chave AES
+        # O contacto pode entao recalcular shared e derivar a chave AES
         aes_key = HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
                        info=b"contact-key-exchange").derive(shared)
         nonce   = os.urandom(12)
@@ -212,4 +245,4 @@ class KeyStore:
         eph_pub_bytes   = eph_pub.public_bytes(Encoding.Raw, PublicFormat.Raw)
         enc_for_contact = base64.b64encode(eph_pub_bytes + nonce + enc_key).decode()
 
-        return enc_for_contact
+        return enc_for_contact, enc_for_self

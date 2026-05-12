@@ -17,7 +17,7 @@ class ServerState:
         self._users:        dict[str, dict]            = {}
         self._online:       dict[str, object]          = {}
         self._offline:      dict[str, list[dict]]      = {}
-        self._pending_keys: dict[str, dict[str, str]]  = {}
+        self._contact_keys: dict[str, dict[str, str]]  = {}
 
         self._lock = threading.Lock()
         self._load_from_disk()
@@ -38,7 +38,7 @@ class ServerState:
                 "contacts": set(),
             }
             self._offline[username]      = []
-            self._pending_keys[username] = {}
+            self._contact_keys[username] = {}
             self._persist_locked()
             return True
 
@@ -112,17 +112,16 @@ class ServerState:
             self._persist_locked()
             return True, f"OK contacto {contact!r} removido."
 
-    def store_pending_key(self, recipient: str, sender: str, enc_key_blob: str):
+    def store_contact_key(self, recipient: str, sender: str, enc_key_owner: str, enc_key_target: str):
         with self._lock:
-            self._pending_keys.setdefault(recipient, {})[sender] = enc_key_blob
+            self._contact_keys.setdefault(sender, {})[recipient] = enc_key_owner
+            self._contact_keys.setdefault(recipient, {})[sender] = enc_key_target
             self._persist_locked()
 
-    def pop_pending_keys(self, username: str) -> dict[str, str]:
+    # chaves permanecem cifradas no servidor, na mesma logica que o par de chaves pessoal protegido
+    def pop_contact_keys(self, username: str) -> dict[str, str]:
         with self._lock:
-            keys = dict(self._pending_keys.get(username, {}))
-            self._pending_keys[username] = {}
-            if keys:
-                self._persist_locked()
+            keys = dict(self._contact_keys.get(username, {}))
             return keys
 
     def queue_message(self, sender: str, recipient: str, content: str) -> tuple[bool, str]:
@@ -139,15 +138,51 @@ class ServerState:
             self._persist_locked()
             return True, "OK mensagem enfileirada."
 
-    def pop_messages(self, username: str, contact: str | None = None) -> list[dict]:
+    def pop_messages(self, username: str, contact: str | None = None, last_id : int | None = None) -> list[dict]:
+        """
+        Retorna as mensagens guardadas no server para historico do cliente.
+        Em caso de omissão de contacto, envia de todos.
+        Em caso de omissão de last_id, envia todas as mensagens do contacto.
+        """
+
         with self._lock:
-            queue = self._offline.get(username, [])
-            if not queue:
+            all_messages = self._offline.get(username, [])
+            if not all_messages:
+                return []
+
+            cursor = last_id if last_id is not None else 0
+
+            # Filtrar as mensagens que o cliente ainda não viu
+            # Usamos o campo 'id' como um inteiro incremental
+            selected = []
+            for m in all_messages:
+                id_match = m.get('id', 0) > cursor
+                contact_match = (contact is None or m.get('from') == contact)
+                
+                if id_match and contact_match:
+                    selected.append(m)
+
+            # Neste momento, persiste-se tudo
+            self._persist_locked()
+
+            return selected
+        
+        with self._lock:
+            messages = self._offline.get(username, [])
+            if last_id is None: last_id = 0
+            if contact is None:
+                return [m for m in messages if m['id'] > float(last_id)]
+            
+            return [m for m in messages if m['ts'] > float(last_id)]
+    
+        with self._lock:
+            messages = self._offline.get(username, [])
+            if not messages:
                 return []
             if contact is None:
                 self._offline[username] = []
                 self._persist_locked()
-                return list(queue)
+                return list(messages)
             selected, remaining = [], []
             for item in queue:
                 (selected if item.get("from") == contact else remaining).append(item)
@@ -182,7 +217,7 @@ class ServerState:
             json.dump({
                 "users":        serializable_users,
                 "offline":      serializable_offline,
-                "pending_keys": self._pending_keys,
+                "contact_keys": self._contact_keys,
             }, f, ensure_ascii=False, indent=2)
 
     def _load_from_disk(self):
@@ -196,7 +231,7 @@ class ServerState:
 
         users        = payload.get("users", {})
         offline      = payload.get("offline", {})
-        pending_keys = payload.get("pending_keys", {})
+        contact_keys = payload.get("contact_keys", {})
 
         if not isinstance(users, dict) or not isinstance(offline, dict):
             return
@@ -230,11 +265,11 @@ class ServerState:
         for username in self._users:
             self._offline.setdefault(username, [])
 
-        for username, keys in pending_keys.items():
+        for username, keys in contact_keys.items():
             if isinstance(keys, dict):
-                self._pending_keys[username] = keys
+                self._contact_keys[username] = keys
         for username in self._users:
-            self._pending_keys.setdefault(username, {})
+            self._contact_keys.setdefault(username, {})
 
     # ------------------------------------------------------------------ #
     # Passwords                                                           #

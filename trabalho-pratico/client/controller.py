@@ -1,16 +1,17 @@
 import json
-import os
 
 from common.secureChannel import SecureChannel
-from client.keystore import KeyStore
+from client.storage.keystore import KeyStore
+from client.storage.messageStore import MessageStore
 
 
 class ClientController:
-    def __init__(self, ch: SecureChannel, keystore: KeyStore):
-        self._ch = ch
-        self._username: str | None = None
-        self._priv_key = None  # X25519PrivateKey em memória após login
-        self._keystore = keystore
+    def __init__(self, ch: SecureChannel, keystore: KeyStore, message_store: MessageStore):
+        self._ch            = ch
+        self._username:  str | None = None
+        self._priv_key   = None  # X25519PrivateKey em memória após login
+        self._keystore   = keystore
+        self._msg_store  = message_store
 
     def register(self, username: str, password: str) -> tuple[bool, str]:
         try:
@@ -49,6 +50,10 @@ class ClientController:
             self._priv_key = self._keystore.load_private_key(username, password)
         except ValueError as e:
             return False, f"Erro ao carregar chaves: {e}"
+        
+        _, _, data = self._request({"type": "FETCH_MESSAGES"})
+        contact_keys = data.get("contact_keys", {})
+        self._process_contact_keys(contact_keys)
 
         self._username = username
         return ok, message
@@ -69,6 +74,11 @@ class ClientController:
         return [c for c in data.get("contacts", []) if isinstance(c, str)]
 
     def add_contact(self, contact: str) -> tuple[bool, str]:
+        # Verificar se já é contacto
+        contacts = self.get_contacts()
+        is_added = contact in contacts
+        if is_added: return
+
         # Pedir chave pública do contacto ao servidor
         ok, _, data = self._request({"type": "GET_PUB_KEY", "username": contact})
         if not ok:
@@ -80,7 +90,7 @@ class ClientController:
 
         # Gerar chave simétrica, guardar para o owner e obter blob cifrado para o contact
         try:
-            enc_for_contact = self._keystore.generate_contact_key(
+            enc_for_contact, enc_for_self = self._keystore.generate_contact_key(
                 self._username, contact, contact_pub_b64, self._priv_key
             )
         except Exception as e:
@@ -90,6 +100,7 @@ class ClientController:
         ok, message, _ = self._request({
             "type":                "ADD_CONTACT",
             "contact":             contact,
+            "enc_key_for_owner":   enc_for_self,
             "enc_key_for_contact": enc_for_contact,
         })
 
@@ -100,19 +111,78 @@ class ClientController:
         return ok, message
 
     def send_message(self, recipient: str, content: str) -> tuple[bool, str]:
-        ok, message, _ = self._request(
-            {"type": "SEND_MESSAGE", "to": recipient, "content": content}
-        )
+        sym_key = self._keystore.get_contact_key(self._username, recipient, self._priv_key)
+        if not sym_key:
+            return False, f"Sem chave de sessão para '{recipient}'. Abra a conversa primeiro."
+ 
+        # Cifrar no cliente — servidor recebe apenas ciphertext
+        e2ee_payload = self._msg_store.encrypt_message(content, sym_key)
+ 
+        ok, message, _ = self._request({
+            "type":    "SEND_MESSAGE",
+            "to":      recipient,
+            "content": e2ee_payload,
+        })
+ 
+        if ok:
+            # Guardar no historico local (cifrado)
+            self._msg_store.append_ciphered(self._username, recipient,
+                                   self._username, content, sym_key)
+ 
         return ok, message
-
-    def fetch_messages(self, contact: str | None = None) -> list[dict]:
-        payload: dict = {"type": "FETCH_MESSAGES"}
-        if contact:
-            payload["contact"] = contact
-        ok, _, data = self._request(payload)
-        if not ok:
+    
+    def fetch_messages(self, contact: str) -> list[dict]:
+        """
+        Vai buscar mensagens novas ao servidor para um determinado contacto, persiste-as localmente
+        e devolve o histórico completo da conversa decifrado.
+        Também processa chaves pendentes de novos contactos.
+        """
+        ok, _, data = self._request({"type": "FETCH_MESSAGES", "contact": contact})
+ 
+        if ok:
+            # Processar chaves pendentes de contactos que nos adicionaram
+            contact_keys = data.get("contact_keys", {})
+            self._process_contact_keys(contact_keys)
+ 
+            # Persistir mensagens novas recebidas
+            new_messages = data.get("messages", [])
+            sym_key = self._keystore.get_contact_key(self._username, contact, self._priv_key)
+            if sym_key:
+                for m in new_messages:
+                    if isinstance(m, dict):
+                        # Decifrar E2EE antes de guardar no histórico local com novo nonce
+                        plaintext = self._msg_store.decrypt_message(m.get("content", ""), sym_key)
+                        if plaintext is not None:
+                            self._msg_store.append_ciphered(
+                                self._username, contact,
+                                m.get("from", "?"), plaintext,
+                                sym_key, ts=m.get("ts")
+                            )
+ 
+        # Devolver historico completo
+        sym_key = self._keystore.get_contact_key(self._username, contact, self._priv_key)
+        if not sym_key:
             return []
-        return [m for m in data.get("messages", []) if isinstance(m, dict)]
+        return self._msg_store.load_all(self._username, contact, sym_key)
+ 
+    def _process_contact_keys(self, contact_keys: dict[str, str]):
+        """
+        Decifra e guarda chaves simétricas enviadas por contactos que nos adicionaram.
+        contact_keys = { sender: enc_key_blob_b64 }
+        """
+        for contact_name, blob in contact_keys.items():            
+            try:
+                if len(blob) == 124:
+                    # Formato com chave efemera (ECDH)
+                    self._keystore.receive_contact_key(
+                        self._username, contact_name, blob, self._priv_key
+                    )
+                elif len(blob) == 80:
+                    # Formato simples (AES direto do owner)
+                    self._keystore.receive_owner_key(self._username, contact_name, blob, self._priv_key)
+                else: print(f"Formato de chave de contacto inválido detetado.")
+            except Exception as e:
+                print(f"  Aviso: erro ao processar chave de '{contact_name}': {e}")
 
     def _request(self, payload: dict) -> tuple[bool, str, dict]:
         try:
