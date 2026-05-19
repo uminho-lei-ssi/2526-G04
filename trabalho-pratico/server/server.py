@@ -1,6 +1,7 @@
 import json
 import socket
 import threading
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from common.secureChannel import SecureChannel
 from server.state import ServerState
 
@@ -195,10 +196,11 @@ class ClientSession(threading.Thread):
 
 
 class ChatServer:
-    def __init__(self, host, port, state):
-        self.addr = (host, port)
-        self.state = state
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    def __init__(self, host, port, state, signing_key: Ed25519PrivateKey):
+        self.addr        = (host, port)
+        self.state       = state
+        self.signing_key = signing_key
+        self.sock        = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
     def start(self):
@@ -210,8 +212,8 @@ class ChatServer:
                 conn, addr = self.sock.accept()
                 print(f"[+] Ligação de {addr} — a fazer handshake...")
                 try:
-                    ch = SecureChannel.server_handshake(conn)
-                    print(f"    Canal seguro estabelecido com {addr}")
+                    ch = SecureChannel.server_handshake(conn, self.signing_key)
+                    print(f"    Canal seguro autenticado com {addr}")
                 except Exception as e:
                     print(f"    Handshake falhou com {addr}: {e}")
                     conn.close()
