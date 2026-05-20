@@ -10,9 +10,13 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.constant_time import bytes_eq
 
 
+_STATE_PATH      = "server/data/server_state.bin"
+_MASTER_KEY_PATH = "server/data/.master_key"
+
+
 class ServerState:
     def __init__(self):
-        self._data_path   = "server/data/server_state.json"
+        self._master_key = self._load_or_generate_master_key()
 
         self._users:        dict[str, dict]            = {}
         self._online:       dict[str, object]          = {}
@@ -191,11 +195,29 @@ class ServerState:
             return selected
 
     # ------------------------------------------------------------------ #
-    # Persistência                                                        #
+    # Persistência cifrada                                               #
     # ------------------------------------------------------------------ #
 
+    def _load_or_generate_master_key(self) -> bytes:
+        """
+        Carrega ou gera a chave mestre do servidor (32 bytes aleatórios).
+        Usada para cifrar o ficheiro de estado em repouso com AES-256-GCM.
+        """
+        os.makedirs(os.path.dirname(_MASTER_KEY_PATH), exist_ok=True)
+        if os.path.exists(_MASTER_KEY_PATH):
+            with open(_MASTER_KEY_PATH, "rb") as f:
+                key = f.read()
+            if len(key) == 32:
+                return key
+        key = os.urandom(32)
+        with open(_MASTER_KEY_PATH, "wb") as f:
+            f.write(key)
+        print(f"[*] Chave mestre do servidor gerada em {_MASTER_KEY_PATH!r}.")
+        return key
+
     def _persist_locked(self):
-        os.makedirs(os.path.dirname(self._data_path), exist_ok=True)
+        """Serializa e cifra o estado completo com AES-256-GCM."""
+        os.makedirs(os.path.dirname(_STATE_PATH), exist_ok=True)
 
         serializable_users = {}
         for username, u in self._users.items():
@@ -209,26 +231,55 @@ class ServerState:
         serializable_offline = {}
         for username, messages in self._offline.items():
             serializable_offline[username] = [
-                {"from": m["from"], "content": (m["content"]), "ts": m["ts"]}
+                {"from": m["from"], "content": m["content"], "ts": m["ts"]}
                 for m in messages
             ]
 
-        with open(self._data_path, "w", encoding="utf-8") as f:
-            json.dump({
-                "users":        serializable_users,
-                "offline":      serializable_offline,
-                "contact_keys": self._contact_keys,
-            }, f, ensure_ascii=False, indent=2)
+        json_bytes = json.dumps({
+            "users":        serializable_users,
+            "offline":      serializable_offline,
+            "contact_keys": self._contact_keys,
+        }, ensure_ascii=False).encode("utf-8")
+
+        nonce      = os.urandom(12)
+        ciphertext = AESGCM(self._master_key).encrypt(nonce, json_bytes, None)
+
+        with open(_STATE_PATH, "wb") as f:
+            f.write(nonce + ciphertext)
 
     def _load_from_disk(self):
-        if not os.path.exists(self._data_path):
-            return
-        try:
-            with open(self._data_path, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-        except (OSError, json.JSONDecodeError):
+        legacy_path = "server/data/server_state.json"
+
+        # Tentar carregar estado cifrado
+        if os.path.exists(_STATE_PATH):
+            try:
+                with open(_STATE_PATH, "rb") as f:
+                    raw = f.read()
+                if len(raw) < 12:
+                    return
+                nonce, ct  = raw[:12], raw[12:]
+                json_bytes = AESGCM(self._master_key).decrypt(nonce, ct, None)
+                payload    = json.loads(json_bytes.decode("utf-8"))
+            except Exception as e:
+                print(f"[!] Erro ao carregar estado cifrado: {e}")
+                return
+            self._deserialize(payload)
             return
 
+        # Migrar estado legado em JSON (plaintext)
+        if os.path.exists(legacy_path):
+            print(f"[*] Estado legado encontrado — a migrar para formato cifrado...")
+            try:
+                with open(legacy_path, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+                self._deserialize(payload)
+                self._persist_locked()
+                os.rename(legacy_path, legacy_path + ".migrated")
+                print(f"[*] Migração concluída.")
+            except Exception as e:
+                print(f"[!] Erro na migração: {e}")
+
+    def _deserialize(self, payload: dict):
         users        = payload.get("users", {})
         offline      = payload.get("offline", {})
         contact_keys = payload.get("contact_keys", {})
@@ -240,7 +291,8 @@ class ServerState:
             if not isinstance(username, str) or not isinstance(u, dict):
                 continue
             contacts_raw = u.get("contacts", [])
-            contacts = {c for c in contacts_raw if isinstance(c, str)} if isinstance(contacts_raw, list) else set()
+            contacts = {c for c in contacts_raw if isinstance(c, str)} \
+                       if isinstance(contacts_raw, list) else set()
             self._users[username] = {
                 "password": u.get("password", ""),
                 "pub_key":  u.get("pub_key", ""),
@@ -256,10 +308,9 @@ class ServerState:
                 if not isinstance(m, dict):
                     continue
                 try:
-                    content = (m["content"])
-                except Exception:
+                    res.append({"from": m["from"], "content": m["content"], "ts": m["ts"]})
+                except KeyError:
                     continue
-                res.append({"from": m["from"], "content": content, "ts": m["ts"]})
             self._offline[username] = res
 
         for username in self._users:
