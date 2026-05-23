@@ -109,16 +109,18 @@ def menu_principal(controller: ClientController) -> bool:
     while True:
         clear()
         header("Menu Principal")
-        choice = prompt_choice(["Contactos", "Logout", "Sair (Manter Sessão)"])
+        choice = prompt_choice(["Contactos", "Grupos", "Logout", "Sair (Manter Sessão)"])
 
         if choice == 0:
             menu_contactos(controller)
         elif choice == 1:
+            menu_grupos(controller)
+        elif choice == 2:
             _, msg = controller.logout()
             print(f"\n  {msg}")
             input("  Enter para continuar...")
             return True
-        elif choice == 2:
+        elif choice == 3:
             return False
 
 
@@ -203,6 +205,160 @@ def _remover_contacto(controller: ClientController):
         return
 
     _, msg = controller.remove_contact(contacts[choice])
+    print(f"\n  {msg}")
+    input("\n  Enter para continuar...")
+
+
+# ---------------------------------------------------------------------------
+# Grupos
+# ---------------------------------------------------------------------------
+
+def menu_grupos(controller: ClientController):
+    while True:
+        clear()
+        header("Grupos")
+        print()
+
+        groups = controller.get_groups()
+        if groups:
+            for g in groups:
+                admin_tag = " [admin]" if g.get("admin") == controller._keystore.username_to_uid(controller._username) else ""
+                print(f"  - {g['name']}{admin_tag}  ({len(g.get('members', []))} membros)")
+        else:
+            print("  (sem grupos)")
+
+        print()
+        choice = prompt_choice(["Abrir grupo", "Criar grupo", "<- Voltar"])
+
+        if choice == 0:
+            _abrir_menu_grupo(controller, groups)
+        elif choice == 1:
+            _criar_grupo(controller)
+        elif choice == 2:
+            return
+
+
+def _criar_grupo(controller: ClientController):
+    clear()
+    header("Criar Grupo")
+    name = prompt_input("Nome do grupo")
+    if not name:
+        print("\n  Nome inválido.")
+        input("\n  Enter para continuar...")
+        return
+
+    print("\n  Introduz os membros um por linha. Linha vazia para terminar.")
+    members = []
+    while True:
+        m = prompt_input(f"  Membro {len(members) + 1} (ou enter para terminar)")
+        if not m:
+            break
+        if m == controller._username:
+            print("  (já és membro automaticamente)")
+            continue
+        members.append(m)
+
+    if not members:
+        print("\n  Nenhum membro adicionado.")
+        input("\n  Enter para continuar...")
+        return
+
+    print(f"\n  A criar grupo '{name}' com {len(members)} membro(s)...")
+    ok, msg = controller.create_group(name, members)
+    print(f"\n  {msg}")
+    input("\n  Enter para continuar...")
+
+
+def _abrir_menu_grupo(controller: ClientController, groups: list[dict]):
+    if not groups:
+        print("\n  Sem grupos disponíveis.")
+        input("\n  Enter para continuar...")
+        return
+
+    clear()
+    header("Seleccionar Grupo")
+    names = [g["name"] for g in groups] + ["Cancelar"]
+    choice = prompt_choice(names)
+    if choice == len(groups):
+        return
+
+    g = groups[choice]
+    _abrir_grupo(controller, g)
+
+
+def _abrir_grupo(controller: ClientController, group: dict):
+    group_id   = group["group_id"]
+    group_name = group["name"]
+    self_uid   = controller._keystore.username_to_uid(controller._username)
+    is_admin   = group.get("admin") == self_uid
+
+    while True:
+        clear()
+        header(f"Grupo: {group_name}")
+        print("  Pressione enter com mensagem vazia para regressar")
+        print()
+
+        messages = controller.fetch_group_messages(group_id)
+        if messages:
+            for item in messages:
+                sender   = item.get("from", "?")
+                content  = item.get("content", "")
+                ts       = item.get("ts", 0)
+                time_str = datetime.fromtimestamp(ts).strftime("%d/%m %H:%M")
+                print(f"    [{time_str}] {sender}: {content}")
+        else:
+            print("  (sem mensagens)")
+
+        options = ["Enviar mensagem"]
+        if is_admin:
+            options += ["Adicionar membro", "Remover membro"]
+        options.append("<- Voltar")
+
+        print()
+        choice = prompt_choice(options)
+
+        if options[choice] == "Enviar mensagem":
+            text = input("\n  Mensagem: ").strip()
+            if text:
+                ok, msg = controller.send_group_message(group_id, text)
+                if not ok:
+                    print(f"\n  {msg}")
+                    input("\n  Enter para continuar...")
+        elif options[choice] == "Adicionar membro":
+            _gerir_membro_grupo(controller, group_id, add=True)
+        elif options[choice] == "Remover membro":
+            _gerir_membro_grupo(controller, group_id, add=False, members=group.get("members", []))
+        elif options[choice] == "<- Voltar":
+            return
+
+
+def _gerir_membro_grupo(controller: ClientController, group_id: str,
+                         add: bool, members: list | None = None):
+    clear()
+    if add:
+        header("Adicionar Membro")
+        username = prompt_input("Username do novo membro")
+        if not username:
+            return
+        ok, msg = controller.add_group_member(group_id, username)
+    else:
+        header("Remover Membro")
+        if not members:
+            print("\n  Sem membros para remover.")
+            input("\n  Enter para continuar...")
+            return
+        self_uid = controller._keystore.username_to_uid(controller._username)
+        removable = [m for m in members if m != self_uid]
+        if not removable:
+            print("\n  Sem membros para remover.")
+            input("\n  Enter para continuar...")
+            return
+        labels = removable + ["Cancelar"]
+        choice = prompt_choice(labels)
+        if choice == len(removable):
+            return
+        ok, msg = controller.remove_group_member(group_id, removable[choice])
+
     print(f"\n  {msg}")
     input("\n  Enter para continuar...")
 

@@ -1,4 +1,5 @@
 import json
+import os
 
 from common.secureChannel import SecureChannel
 from common.ca import verify_certificate
@@ -247,6 +248,156 @@ class ClientController:
         if not isinstance(data, dict):
             data = {}
         return ok, text, data
+
+    # ------------------------------------------------------------------ #
+    # Grupos                                                             #
+    # ------------------------------------------------------------------ #
+
+    def _get_certified_pub_key(self, uid: str) -> tuple[str | None, str]:
+        """Devolve (pub_key_b64, erro). Verifica certificado CA."""
+        ok, _, data = self._request({"type": "GET_PUB_KEY", "uid": uid})
+        if not ok:
+            return None, f"Utilizador '{uid[:8]}...' não encontrado."
+        cert_json = data.get("cert", "")
+        sig_b64   = data.get("sig", "")
+        if not cert_json or not sig_b64:
+            return None, "Servidor não devolveu certificado."
+        try:
+            cert = verify_certificate(cert_json, sig_b64, self._server_signing_pub)
+        except ValueError as e:
+            return None, f"Certificado inválido: {e}"
+        if cert.get("uid") != uid:
+            return None, "Certificado não corresponde ao UID."
+        return cert.get("pub_key", ""), ""
+
+    def create_group(self, name: str, members: list[str]) -> tuple[bool, str]:
+        """
+        name: nome do grupo visível.
+        members: lista de usernames dos membros (sem incluir o próprio).
+        """
+        self_uid = self._keystore.username_to_uid(self._username)
+
+        # Resolver UIDs e verificar certificados de todos os membros
+        all_uids_and_pubs: dict[str, str] = {}
+        for m in members:
+            uid = self._keystore.resolve_username_to_uid(self._username, m) or m
+            if uid == self_uid:
+                continue
+            pub_b64, err = self._get_certified_pub_key(uid)
+            if not pub_b64:
+                return False, err
+            all_uids_and_pubs[uid] = pub_b64
+
+        if not all_uids_and_pubs:
+            return False, "Sem membros válidos para criar o grupo."
+
+        # Incluir o próprio utilizador com a sua pub_key local
+        self_pub_b64 = self._keystore.load_public_key_bytes(self._username)
+        import base64 as _b64
+        all_uids_and_pubs[self_uid] = _b64.b64encode(self_pub_b64).decode()
+
+        # Gerar chave de grupo e cifrar para cada membro via ECDH
+        group_key = os.urandom(32)
+        enc_keys  = {
+            uid: self._keystore.encrypt_group_key_for(group_key, pub)
+            for uid, pub in all_uids_and_pubs.items()
+        }
+
+        ok, message, data = self._request({
+            "type":     "CREATE_GROUP",
+            "name":     name,
+            "members":  list(all_uids_and_pubs.keys()),
+            "enc_keys": enc_keys,
+        })
+
+        if ok:
+            group_id = data.get("group_id", "")
+            if group_id:
+                self._keystore.save_group_key(self._username, group_id, group_key, name)
+
+        return ok, message
+
+    def get_groups(self) -> list[dict]:
+        """Devolve grupos do utilizador, sincronizando chaves em falta."""
+        ok, _, data = self._request({"type": "GET_GROUPS"})
+        if not ok:
+            return []
+        groups = data.get("groups", [])
+        for g in groups:
+            gid  = g.get("group_id", "")
+            name = g.get("name", "")
+            if gid and not self._keystore.get_group_key(self._username, gid):
+                ok2, _, kdata = self._request({"type": "GET_GROUP_KEY", "group_id": gid})
+                if ok2:
+                    enc_key = kdata.get("enc_key", "")
+                    if enc_key:
+                        try:
+                            self._keystore.receive_group_key(self._username, gid, enc_key, name)
+                        except Exception as e:
+                            print(f"  Aviso: não foi possível decifrar chave do grupo '{name}': {e}")
+        return groups
+
+    def send_group_message(self, group_id: str, content: str) -> tuple[bool, str]:
+        group_key = self._keystore.get_group_key(self._username, group_id)
+        if not group_key:
+            return False, "Sem chave para este grupo."
+        e2ee = self._msg_store.encrypt_message(content, group_key)
+        ok, message, _ = self._request({
+            "type":     "SEND_GROUP_MESSAGE",
+            "group_id": group_id,
+            "content":  e2ee,
+        })
+        if ok:
+            self._msg_store.append_ciphered(
+                self._username, f"grp_{group_id}",
+                self._username, content, group_key
+            )
+        return ok, message
+
+    def fetch_group_messages(self, group_id: str) -> list[dict]:
+        group_key = self._keystore.get_group_key(self._username, group_id)
+        if not group_key:
+            return []
+        ok, _, data = self._request({"type": "FETCH_GROUP_MESSAGES", "group_id": group_id})
+        if ok:
+            for m in data.get("messages", []):
+                if not isinstance(m, dict):
+                    continue
+                plaintext = self._msg_store.decrypt_message(m.get("content", ""), group_key)
+                if plaintext is not None:
+                    sender_uid = m.get("from", "?")
+                    sender = self._keystore.resolve_uid(self._username, sender_uid) or sender_uid
+                    self._msg_store.append_ciphered(
+                        self._username, f"grp_{group_id}",
+                        sender, plaintext, group_key, ts=m.get("ts")
+                    )
+        return self._msg_store.load_all(self._username, f"grp_{group_id}", group_key)
+
+    def add_group_member(self, group_id: str, member: str) -> tuple[bool, str]:
+        group_key = self._keystore.get_group_key(self._username, group_id)
+        if not group_key:
+            return False, "Sem chave para este grupo."
+        uid = self._keystore.resolve_username_to_uid(self._username, member) or member
+        pub_b64, err = self._get_certified_pub_key(uid)
+        if not pub_b64:
+            return False, err
+        enc_key = self._keystore.encrypt_group_key_for(group_key, pub_b64)
+        ok, message, _ = self._request({
+            "type":     "ADD_GROUP_MEMBER",
+            "group_id": group_id,
+            "uid":      uid,
+            "enc_key":  enc_key,
+        })
+        return ok, message
+
+    def remove_group_member(self, group_id: str, member: str) -> tuple[bool, str]:
+        uid = self._keystore.resolve_username_to_uid(self._username, member) or member
+        ok, message, _ = self._request({
+            "type":     "REMOVE_GROUP_MEMBER",
+            "group_id": group_id,
+            "uid":      uid,
+        })
+        return ok, message
 
     def disconnect(self):
         # Limpeza centralizada em KeyStore: apaga ficheiros locais e limpa seed ativo
