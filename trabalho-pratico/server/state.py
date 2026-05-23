@@ -29,9 +29,10 @@ class ServerState:
     # ------------------------------------------------------------------ #
 
     def register_user(self, username: str, password: str,
-                      pub_key: str, blob: str) -> bool:
+                      pub_key: str, blob: str,
+                      cert: str = "", sig: str = "") -> bool:
         """
-        Recebe a pub_key e o blob (que contém salt + nonce + enc_seed)
+        Recebe a pub_key, o blob (salt + nonce + enc_seed) e o certificado CA.
         """
         with self._lock:
             if username in self._users:
@@ -40,6 +41,8 @@ class ServerState:
                 "password": self._hash_password(password),
                 "pub_key":  pub_key,
                 "blob":     blob,
+                "cert":     cert,
+                "sig":      sig,
                 "contacts": set(),
             }
             self._offline[username]      = []
@@ -72,6 +75,18 @@ class ServerState:
         with self._lock:
             user = self._users.get(username)
             return user.get("pub_key") if user else None
+
+    def get_cert(self, username: str) -> tuple[str, str] | None:
+        """Devolve (cert_json, sig_b64) ou None se não existir."""
+        with self._lock:
+            user = self._users.get(username)
+            if not user:
+                return None
+            cert = user.get("cert", "")
+            sig  = user.get("sig", "")
+            if not cert or not sig:
+                return None
+            return cert, sig
 
     def login_user(self, username: str, handler) -> bool:
         with self._lock:

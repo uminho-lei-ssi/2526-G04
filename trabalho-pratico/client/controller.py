@@ -1,17 +1,20 @@
 import json
 
 from common.secureChannel import SecureChannel
+from common.ca import verify_certificate
 from client.storage.keystore import KeyStore
 from client.storage.messageStore import MessageStore
 
 
 class ClientController:
-    def __init__(self, ch: SecureChannel, keystore: KeyStore, message_store: MessageStore):
-        self._ch          = ch
+    def __init__(self, ch: SecureChannel, keystore: KeyStore,
+                 message_store: MessageStore, server_signing_pub: bytes):
+        self._ch                 = ch
         self._username:  str | None = None
-        self._master_seed            = None
-        self._keystore   = keystore
-        self._msg_store  = message_store
+        self._master_seed        = None
+        self._keystore           = keystore
+        self._msg_store          = message_store
+        self._server_signing_pub = server_signing_pub
 
     def register(self, username: str, password: str) -> tuple[bool, str]:
         try:
@@ -93,9 +96,19 @@ class ClientController:
         if not ok:
             return False, f"UID '{contact}' não encontrado."
 
-        contact_pub_b64 = data.get("pub_key", "")
-        if not contact_pub_b64:
-            return False, "Servidor não devolveu chave pública."
+        cert_json = data.get("cert", "")
+        sig_b64   = data.get("sig", "")
+        if not cert_json or not sig_b64:
+            return False, "Servidor não devolveu certificado do contacto."
+
+        try:
+            cert = verify_certificate(cert_json, sig_b64, self._server_signing_pub)
+        except ValueError as e:
+            return False, f"Certificado inválido: {e}"
+
+        contact_pub_b64 = cert.get("pub_key", "")
+        if cert.get("uid") != uid or not contact_pub_b64:
+            return False, "Certificado não corresponde ao UID solicitado."
 
         try:
             enc_for_contact, enc_for_self = self._keystore.generate_contact_key(
