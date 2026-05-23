@@ -81,7 +81,8 @@ def main():
         ch.close()
         return
 
-    controller = ClientController(ch, KeyStore(keys_dir), MessageStore(messages_dir))
+    controller = ClientController(ch, KeyStore(keys_dir), MessageStore(messages_dir),
+                                  server_pub_bytes)
 
     try:
         ui.start(controller)

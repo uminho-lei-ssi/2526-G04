@@ -1,99 +1,130 @@
-# Secure Chat
+# Secure Chat — SSI 2025/26 · Grupo 04
 
-Aplicação de chat segura cliente-servidor com registo, autenticação, gestão de contactos e mensagens offline.
-
-NOTA: Por atualizar no que toca a features e arquitetura etc.
-
-## TODO's
-- interrupt no processo apagar credenciais de user do sistema local como em logout (improve) (registo tambem permite deixar credenciais por apagar no sistema porque nao da login automatico, ou nao escrever logo ou fazer login)
-- Logistica:
-    - pôr dados em pastas dedicadas por user? (fornece meta info, portanto sus, acho que nao é preciso)
-    - neste momento server recusa segunda sessao para mesmo cliente, poderia fechar a antiga mas envolvia refazer chaves TODAS etc. provavelmente, improve para depois
-      - imagino que isto influenciaria a geração do nonce para os contactos de cada user (que nao deve ser reutilizado)
-    - colocar mensagens mostradas tipo 10/20 de cada vez e depois trocar pagina etc.
-    - sair de conversa leva a menu contactos em vez de abrir conversa, podia ser assim…?
-    - colocar contactos com mensagens novas acima
-    - mostrar contactos da mesma forma
-    - colocar process_contact_keys aquando aceitar novo contacto, nao automatico, senao flood no cliente
-    - colocar limite no tempo de tentativas de login para atenuar bruteforce
-    - colocar requisitos de segurança na pass
-    - alterar password?
-    - apagar conta?
-- estado do cliente:
-    - faz sentido guardar historico com TUDO cifrado incluindo metadados ig
-        - nome do ficheiro tambem ig
-    - registar nao faz login mas guarda credenciais
-- estado do server:
-    - encriptar lista de contactos
-- confirmar se mais parametros devem residir em config.ini
-- tecnicamente fetch historico de mensagens podia ser mais otimizado para nao guardar e pegar no que acabou de guardar
-
-
-## Features por Implementar
-
-- Grupos
-   - ja temos chaves simetricas entre users, era abranger o protocolo a grupos com UI e etc.
-- Mensagens Offline
-   - funciona ig
-- P2P
-   - nada
-- Forward Secrecy
-   - já temos chaves cifradas, envolveria so manter mais delas ig
-- PKI
-   - falta fazer servidor (autenticar-se e aos seus users?) como entidade de certificação
+Aplicação de chat segura cliente-servidor com E2EE, PKI integrada e mensagens offline.  
+Implementada em Python com a biblioteca `cryptography`.
 
 ---
 
-## Estrutura do projeto
+## Estado do Projecto
+
+### Requisitos Base
+
+| Requisito | Estado |
+|-----------|--------|
+| Registo e autenticação de utilizadores | ✅ Feito |
+| Canal de transporte seguro (TCP + cifra) | ✅ Feito |
+| Autenticação do servidor (Ed25519, TOFU) | ✅ Feito |
+| E2EE nas mensagens (por par de contactos) | ✅ Feito |
+| Gestão de contactos (adicionar/remover/listar) | ✅ Feito |
+| Identidade opaca (SHA-256 do username) | ✅ Feito |
+| Persistência do estado no servidor | ✅ Feito |
+
+### Valorizações
+
+| Valorização | Estado |
+|-------------|--------|
+| Mensagens Offline | ✅ Feito |
+| PKI / Entidade de Certificação (CA self-signed) | ✅ Feito |
+| Forward Secrecy | ❌ Por fazer |
+| Modo Descentralizado (PGP-like / P2P) | ❌ Por fazer |
+| Mensagens de Grupo | ❌ Por fazer |
+
+### TODOs pendentes (segurança / funcionalidade)
+
+**Alta prioridade:**
+- [ ] Limite de tentativas de login (mitigação de bruteforce)
+- [ ] Requisitos mínimos de segurança na password
+- [ ] Cleanup de credenciais locais ao receber SIGINT/KeyboardInterrupt
+- [ ] `process_contact_keys` só ao aceitar explicitamente um contacto (evitar flood/DoS)
+- [ ] Registo deixa credenciais em disco sem fazer login — limpar ou fazer login automático
+
+**Média prioridade:**
+- [ ] Paginação do histórico de mensagens (evitar UI inutilizável com histórico longo)
+
+**Baixa prioridade (UX):**
+- [ ] Sair de conversa leva ao menu de contactos
+- [ ] Contactos com mensagens novas aparecem no topo
+- [ ] Alterar password / apagar conta
+
+---
+
+## Arquitectura
 
 ```
 .
 ├── client/
-│   ├── main.py              # Ponto de entrada do cliente
-│   ├── config.ini           # Configuração (servidor, keys_dir)
-│   ├── controller.py        # Lógica de negócio (login, mensagens, contactos)
-│   ├── interface.py         # UI interativa (terminal)
-│   ├── keystore.py          # Gestão de chaves Ed25519 cifradas
-│   └── transport.py         # Transporte TCP com framing
+│   ├── main.py              # Ponto de entrada; handshake TLS + TOFU; inicia UI
+│   ├── config.ini           # Configuração (endereço servidor, diretórios)
+│   ├── controller.py        # Lógica de negócio (login, contactos, mensagens, PKI)
+│   ├── interface.py         # UI interativa em terminal
+│   └── storage/
+│       ├── keystore.py      # Master Seed, X25519, chaves de contactos (AES-GCM)
+│       └── messageStore.py  # Histórico local cifrado por conversa
 ├── server/
-│   ├── main.py              # Ponto de entrada do servidor
-│   ├── server.py            # Servidor TCP e ClientSession
-│   ├── state.py             # Estado global (utilizadores, mensagens offline)
-│   └── transport.py         # Transporte TCP com framing
+│   ├── main.py              # Ponto de entrada; gera/carrega chave Ed25519 da CA
+│   ├── server.py            # Servidor TCP, despacho de comandos por sessão
+│   ├── state.py             # Estado global (utilizadores, offline queue, contactos)
+│   └── ca.py                # Emissão de certificados (CA)
 ├── common/
-│   ├── security.py          # SecureChannel com handshake X25519 + AES-GCM
-│   └── transport.py         # Primitivas TCP (send/recv framing)
+│   ├── secureChannel.py     # Canal seguro: X25519 + Ed25519 + AES-256-GCM
+│   ├── transport.py         # Framing TCP (length-prefixed)
+│   └── ca.py                # Verificação de certificados (lado cliente)
 └── README.md
 ```
 
 ---
 
-## Funcionalidades
+## Modelo de Segurança
 
-### Autenticação e Utilizadores
-- **Registo**: Criar nova conta com username e password
-- **Login**: Autenticar com credenciais; password verificada com PBKDF2-SHA256
-- **Logout**: Encerrar sessão
+### Canal de Transporte
 
-### Gestão de Contactos
-- Adicionar/remover contactos da lista pessoal
-- Listar contactos ordenados por nome
+Handshake autenticado ao estabelecer cada ligação TCP:
 
-### Mensagens
-- Enviar mensagens para contactos na lista
-- Receber mensagens (online ou offline)
-- Mensagens offline armazenadas e cifradas no servidor com AES-GCM
+```
+C → S : eph_pub_client  (32 bytes X25519)
+S → C : signing_pub     (32 bytes Ed25519, chave de longa duração do servidor)
+        + eph_pub_server (32 bytes X25519)
+        + sig(signing_priv, eph_pub_server)  (64 bytes Ed25519)
+```
 
-### Segurança
-- **Handshake X25519**: Estabelecimento de canal seguro com ECDH
-- **Derivação de chave**: HKDF-SHA256 com label "chat-session-key"
-- **Transporte**: Mensagens em plaintext após handshake (sem cifra de aplicação)
-- **Passwords**: PBKDF2-HMAC-SHA256 com 150k iterações, salt aleatório
-- **Chaves locais**: Pares Ed25519 cifrados com AES-256-GCM (derivado da password)
+O cliente verifica a assinatura e valida `signing_pub` via **TOFU** (guardada em `client/data/server_pubkey.b64` na primeira ligação). A chave de sessão é derivada por `HKDF-SHA256(X25519(eph_priv_c, eph_pub_s), info="chat-session-key")`. Todas as mensagens são cifradas com **AES-256-GCM**.
+
+### PKI — Entidade de Certificação
+
+O servidor age como CA self-signed. No **registo**, emite um certificado digital:
+
+```json
+{ "uid": "<sha256-hex do username>", "pub_key": "<base64 X25519>", "issued_at": <unix_ts> }
+```
+
+Assinado com Ed25519 (`signing_key` do servidor). Quando um cliente adiciona um contacto, recebe a `pub_key` acompanhada de `(cert_json, sig_b64)` e **verifica a assinatura** com a `signing_pub` já fixada via TOFU antes de usar a chave. Isto garante autenticidade mesmo que o servidor seja comprometido em trânsito.
+
+### Identidade
+
+O username nunca é enviado ao servidor em claro. É substituído pelo seu **SHA-256 em hex** (`uid`). O username real é trocado entre os dois clientes cifrado com a chave simétrica E2EE do par.
+
+### E2EE por Par de Contactos
+
+Quando Alice adiciona Bob:
+
+1. Alice pede a `pub_key` de Bob ao servidor, verifica o certificado CA.
+2. Alice gera uma chave simétrica AES-256 (`sym_key`) aleatória.
+3. Cifra `sym_key` para Bob via **ECDH efémero** (X25519): `enc_for_contact = eph_pub ‖ nonce ‖ AES-GCM(HKDF(X25519(eph, bob_pub)), sym_key)`.
+4. Cifra `sym_key` para si mesma com a sua *storage key* (derivada da Master Seed).
+5. Envia ambos ao servidor; Bob recebe `enc_for_contact` na próxima sincronização e decifra com a sua chave privada X25519.
+
+Todas as mensagens e metadados trocados são cifrados com `sym_key` (AES-256-GCM).
+
+### Passwords e Chaves Locais
+
+- Passwords: **PBKDF2-HMAC-SHA256**, 150 000 iterações, salt de 16 bytes (armazenadas no servidor).
+- Master Seed (32 bytes aleatórios): cifrada com **AES-256-GCM** cuja chave é derivada da password via PBKDF2. Blob `salt ‖ nonce ‖ enc_seed` sincronizado com o servidor.
+- Chave de identidade X25519: derivada da Master Seed via `HKDF(seed, info="identity-key")`.
+- *Storage key* (para chaves de contactos em repouso): `HKDF(seed, info="contact-key-storage")`.
 
 ---
 
-## Como executar
+## Como Executar
 
 ### Setup
 
@@ -110,76 +141,47 @@ pip install cryptography
 python3 -m server.main
 ```
 
-Inicia servidor na porta 12345 (configurável em `common/config.ini`).
+Gera (ou carrega) a chave Ed25519 da CA em `server/data/server_signing.pem` e imprime a chave pública. Escuta na porta configurada em `server/config.ini` (padrão: `12345`).
 
 ### Cliente
-
-Em outro terminal:
 
 ```bash
 python3 -m client.main
 ```
 
-Múltiplos clientes podem rodar simultaneamente. Cada cliente armazena as suas chaves em `data/keys/<username>.json` (configurável em `client/config.ini`).
+Na primeira ligação, aceita a chave do servidor via TOFU e guarda-a em `client/data/server_pubkey.b64`. Múltiplos clientes podem correr em simultâneo.
 
----
+### Reset de estado
 
-## Protocolo de Transporte
-
-Toda a comunicação usa TCP com framing simples:
-
-```
-[ 4 bytes big-endian ] [ N bytes de payload ]
-   tamanho do payload      dados em UTF-8
-```
-
-Após handshake X25519, as mensagens são trocadas em plaintext (sem cifra adicional) por agora.
-
----
-
-## Protocolo de Aplicação
-
-### Mensagens JSON
-
-**Login**
-```json
-{"type": "LOGIN", "username": "alice", "password": "secret"}
-```
-
-**Registar**
-```json
-{"type": "REGISTER", "username": "bob", "password": "pass", 
- "pub_key": "<base64>", "enc_priv": "<base64>"}
-```
-
-**Enviar mensagem**
-```json
-{"type": "SEND_MESSAGE", "to": "alice", "content": "Oi!"}
-```
-
-**Obter mensagens**
-```json
-{"type": "FETCH_MESSAGES", "contact": "alice"}
-```
-
-### Resposta do servidor
-
-```json
-{"type": "RESPONSE", "ok": true/false, "message": "...", "data": {...}}
+```bash
+./resetState.sh
 ```
 
 ---
 
-## Notas de Segurança
+## Protocolo de Aplicação (JSON sobre AES-256-GCM/TCP)
 
-1. **Sem autenticação de servidor**: O handshake X25519 estabelece um canal privado mas não autentica o servidor (sem certificados).
-2. **Mensagens não autenticadas**: Após handshake, mensagens não têm MAC ou assinatura digital.
-3. **Armazenamento offline**: Mensagens offline cifradas no servidor com chave mestra (regenerável após reinício).
-4. **Sem Perfect Forward Secrecy**: Reutiliza-se a mesma chave de sessão durante toda a sessão.
+Todos os comandos são JSON sobre o canal cifrado. O servidor responde sempre com:
+
+```json
+{ "type": "RESPONSE", "ok": true|false, "message": "...", "data": { ... } }
+```
+
+| Comando | Campos obrigatórios | Notas |
+|---------|---------------------|-------|
+| `REGISTER` | `username` (uid), `password`, `pub_key`, `blob` | Servidor emite certificado CA |
+| `LOGIN` | `username` (uid), `password` | Devolve `pub_key` + `blob` para sincronizar cofre |
+| `LOGOUT` | — | |
+| `GET_PUB_KEY` | `uid` | Devolve `pub_key`, `cert`, `sig` |
+| `GET_CONTACTS` | — | Devolve lista de UIDs + `contact_keys` pendentes |
+| `ADD_CONTACT` | `contact` (uid), `enc_key_for_owner`, `enc_key_for_contact`, `enc_username` | |
+| `REMOVE_CONTACT` | `contact` (uid) | |
+| `SEND_MESSAGE` | `to` (uid), `content` (E2EE blob) | |
+| `FETCH_MESSAGES` | `contact` (uid, opcional) | Devolve mensagens + `contact_keys` pendentes |
 
 ---
 
 ## Dependências
 
-- `cryptography`: X25519, AESGCM, PBKDF2-HMAC, Ed25519
 - Python 3.10+
+- `cryptography` — X25519, Ed25519, AES-256-GCM, PBKDF2-HMAC, HKDF
