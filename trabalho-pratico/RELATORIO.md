@@ -5,7 +5,7 @@
 
 ## 1. Descrição Geral
 
-O projecto consiste numa aplicação de chat segura cliente-servidor implementada em Python com a biblioteca `cryptography`. O sistema garante *End-to-End Encryption* (E2EE) nas mensagens trocadas entre utilizadores, assegurando que o servidor — mesmo que comprometido — não consegue aceder ao conteúdo das comunicações nem identificar os participantes por nome. Para além da funcionalidade base, foram implementadas as valorizações de mensagens offline, PKI/CA e mensagens de grupo.
+O projecto consiste numa aplicação de chat segura cliente-servidor implementada em Python com a biblioteca `cryptography`. O sistema garante *End-to-End Encryption* (E2EE) nas mensagens trocadas entre utilizadores, assegurando que o servidor — mesmo que comprometido — não consegue aceder ao conteúdo das comunicações nem identificar os participantes por nome. Para além da funcionalidade base, foram implementadas as valorizações de mensagens offline, PKI/CA, mensagens de grupo e rotação de chaves para *forward secrecy* parcial.
 
 ---
 
@@ -91,7 +91,7 @@ Cliente                                    Servidor
   │  uid = SHA-256(username)                  │
   │                                            │
   │──── REGISTER {uid, pwd, pub_key, blob} ──▶│
-  │                                            │  cert = {uid, pub_key, issued_at}
+  │                                            │  cert = {uid, pub_key}
   │                                            │  sig  = Ed25519Sign(signing_key, cert)
   │                                            │  guarda {hash(pwd), pub_key, blob, cert, sig}
   │◀─── RESPONSE {ok: true} ──────────────────│
@@ -110,11 +110,11 @@ Cliente                                    Servidor
   │  decifra blob com PBKDF2(pwd) → seed      │
   │  guarda seed em memória                   │
   │──── FETCH_MESSAGES {} ───────────────────▶│
-  │◀─── {messages, contact_keys} ─────────────│
-  │  processa contact_keys pendentes          │
+  │◀─── {messages, contact_keys, key_rotations}
+  │  processa contact_keys e rotações pendentes
 ```
 
-Após login bem-sucedido, o cliente busca imediatamente as mensagens e chaves de contacto pendentes para completar eventuais handshakes E2EE iniciados por outros utilizadores enquanto estava offline.
+Após login bem-sucedido, o cliente busca imediatamente as mensagens, chaves de contacto e rotações de chave pendentes para completar eventuais handshakes E2EE iniciados por outros utilizadores enquanto estava offline.
 
 ### 3.4 Adição de Contacto e Troca de Chave E2EE
 
@@ -152,7 +152,7 @@ Alice                     Servidor                      Bob
 
 A chave simétrica `sym_key` é gerada aleatoriamente por Alice e cifrada via ECDH efémero para Bob, garantindo que apenas Bob (com a sua chave privada X25519) a pode decifrar. O servidor nunca vê `sym_key` em claro.
 
-Após este handshake, todas as mensagens entre Alice e Bob são cifradas com `sym_key` usando AES-256-GCM antes de serem enviadas ao servidor.
+Após este handshake, todas as mensagens entre Alice e Bob são cifradas com `sym_key` usando AES-256-GCM antes de serem enviadas ao servidor. Esta chave pode ser posteriormente substituída por uma nova chave simétrica através do mecanismo de rotação descrito abaixo.
 
 ### 3.5 Envio e Recepção de Mensagens
 
@@ -170,17 +170,39 @@ Alice                     Servidor                      Bob
 
 O servidor armazena exclusivamente o ciphertext. Mesmo com acesso ao estado do servidor, um atacante vê apenas dados cifrados sem capacidade de os decifrar.
 
-### 3.6 PKI — Emissão e Verificação de Certificados
+### 3.6 Rotação de Chaves 1-para-1 (*Forward Secrecy*)
+
+Para reduzir o impacto de uma eventual exposição futura de uma chave de contacto, o cliente suporta rotação da `sym_key` usada nas conversas 1-para-1. Ao abrir uma conversa, o cliente tenta obter a chave pública certificada do contacto e gerar uma nova chave simétrica aleatória:
+
+```
+Alice                                      Servidor/Bob
+  │  GET_PUB_KEY(uid_bob) → verifica cert   │
+  │  new_sym_key = AES-256 aleatória        │
+  │  eph_priv = X25519.generate()           │
+  │  shared = X25519(eph_priv, pub_bob)     │
+  │  aes = HKDF(shared, "contact-key-rotation")
+  │  enc_blob = eph_pub‖nonce‖AES-GCM(aes, new_sym_key)
+  │  guarda new_sym_key localmente          │
+  │──── ROTATE_KEY {uid_bob, enc_blob} ────▶│
+  │                                          │  guarda em key_rotations[bob][alice]
+  │             Bob──── FETCH_MESSAGES ────▶│
+  │             Bob◀─── {key_rotations: {alice: enc_blob}}
+  │             Bob decifra e substitui sym_key
+```
+
+O servidor apenas armazena o pacote cifrado de rotação enquanto Bob ainda não o sincronizou. A derivação usa uma etiqueta HKDF diferente (`"contact-key-rotation"`) para separar este uso do handshake inicial de contactos.
+
+### 3.7 PKI — Emissão e Verificação de Certificados
 
 No registo, o servidor emite um certificado digital associando o UID à chave pública X25519 do utilizador:
 
 ```json
-{ "issued_at": 1748000000, "pub_key": "<base64 X25519>", "uid": "<sha256 hex>" }
+{ "pub_key": "<base64 X25519>", "uid": "<sha256 hex>" }
 ```
 
 O certificado é serializado em JSON canónico (chaves ordenadas, sem espaços) e assinado com a chave Ed25519 de longa duração do servidor. Esta assinatura é verificada pelo cliente sempre que obtém a chave pública de um contacto (fluxo `GET_PUB_KEY`), usando a `signing_pub` fixada via TOFU. Desta forma, mesmo que o servidor seja comprometido em memória, não pode substituir a chave pública de um utilizador sem invalidar a assinatura — a chave privada Ed25519 seria necessária para forjar um certificado válido.
 
-### 3.7 Mensagens de Grupo
+### 3.8 Mensagens de Grupo
 
 A criação de um grupo por Alice com membros Bob e Charlie:
 
@@ -202,7 +224,7 @@ Alice                                      Servidor
 
 Quando Bob faz login e chama `GET_GROUPS`, o servidor indica que pertence a um grupo. O cliente busca `GET_GROUP_KEY` e decifra a sua cópia da `group_key` via ECDH. Todas as mensagens de grupo são cifradas/decifradas com `group_key` usando AES-256-GCM. O servidor entrega as mensagens apenas aos membros actuais do grupo.
 
-O administrador pode adicionar membros (cifrando a `group_key` actual para o novo membro via ECDH) ou remover membros (o servidor deixa de entregar mensagens ao removido).
+O administrador pode adicionar membros (cifrando a `group_key` actual para o novo membro via ECDH) ou remover membros. Após remover um membro, o cliente administrador gera uma nova chave de grupo, cifra-a para todos os membros restantes e envia-a ao servidor através de `ROTATE_GROUP_KEY`. Desta forma, o membro removido deixa de receber mensagens novas e também deixa de possuir a chave necessária para as decifrar caso as obtenha por outro meio.
 
 ---
 
@@ -238,9 +260,13 @@ Para cada par de contactos existe uma chave simétrica AES-256 (`sym_key`), gera
 
 Localmente, as chaves de contacto são guardadas cifradas em `<username>_contacts.json`, protegidas pela `storage_key` derivada da Master Seed.
 
+A chave de contacto pode ser rotacionada durante a utilização da conversa. Nesse caso, é gerada uma nova `sym_key`, guardada localmente pelo emissor e enviada cifrada para o destinatário com ECDH efémero usando `info="contact-key-rotation"`. Quando o destinatário sincroniza `FETCH_MESSAGES`, processa a rotação pendente e substitui a chave antiga pela nova.
+
 ### 4.3 Chaves de Grupo
 
 Cada grupo possui uma chave simétrica AES-256 (`group_key`), gerada pelo criador. É distribuída a cada membro via ECDH efémero com `info="group-key-exchange"` (para separação de domínio relativamente às chaves de contacto). Localmente, é guardada cifrada em `<username>_groups.json` com a `storage_key`.
+
+Quando um membro é removido, o administrador gera uma nova `group_key` e cifra-a de novo para todos os membros que permanecem no grupo. O servidor apenas substitui o mapa `enc_keys` associado ao grupo; nunca vê a nova chave em claro.
 
 ### 4.4 Separação de Domínio (Domain Separation)
 
@@ -252,6 +278,7 @@ Todas as derivações HKDF usam etiquetas (`info`) distintas para garantir que c
 | `"identity-key"` | Par X25519 de identidade |
 | `"contact-key-storage"` | Protecção local de chaves de contacto |
 | `"contact-key-exchange"` | Troca de chave simétrica entre dois utilizadores |
+| `"contact-key-rotation"` | Rotação da chave simétrica de uma conversa 1-para-1 |
 | `"group-key-exchange"` | Distribuição de chave de grupo |
 
 ### 4.5 Identidade Opaca
@@ -289,7 +316,7 @@ O sistema foi desenhado considerando dois adversários distintos:
 
 **Autenticidade do servidor:** O handshake inclui uma assinatura Ed25519 do servidor sobre a sua chave efémera X25519. O cliente verifica esta assinatura com a `signing_pub` fixada via TOFU, impedindo que um MITM substitua o servidor.
 
-**Autenticidade das chaves de utilizadores (PKI):** Cada chave pública X25519 é acompanhada de um certificado assinado pela CA do servidor (Ed25519). O cliente verifica o certificado antes de usar qualquer chave pública para cifrar uma chave de contacto ou grupo, garantindo que mesmo um servidor comprometido em runtime não pode substituir chaves publicas de utilizadores sem invalidar a assinatura da CA.
+**Autenticidade das chaves de utilizadores (PKI):** Cada chave pública X25519 é acompanhada de um certificado assinado pela CA do servidor (Ed25519). O cliente verifica o certificado antes de usar qualquer chave pública para cifrar uma chave de contacto ou grupo, garantindo que mesmo um servidor comprometido em runtime não pode substituir chaves públicas de utilizadores sem invalidar a assinatura da CA.
 
 **Privacidade de identidade:** O servidor nunca recebe usernames em claro. Os UIDs (SHA-256 do username) são não-reversíveis sem conhecer o username de antemão. Os usernames reais são trocados cifrados com a chave E2EE do par.
 
@@ -299,11 +326,13 @@ O sistema foi desenhado considerando dois adversários distintos:
 
 **Controlo de acesso em grupos:** O servidor apenas entrega mensagens de grupo a membros actuais. A adição/remoção de membros é restrita ao administrador do grupo. Novos membros recebem a chave de grupo cifrada via ECDH, sem que o servidor tenha acesso à chave em claro.
 
+**Forward secrecy parcial:** O canal cliente-servidor usa ECDH efémero por ligação. Nas conversas 1-para-1, a chave E2EE pode ser rotacionada quando a conversa é aberta, sendo a nova chave enviada cifrada para o contacto. Nos grupos, a chave é rotacionada após remoção de membros, impedindo que membros removidos continuem a decifrar mensagens futuras apenas por terem guardado a chave antiga.
+
 ### 5.4 Limitações Conhecidas
 
-**Forward secrecy parcial:** A chave de sessão do canal (por ligação) usa ECDH efémero, pelo que é renovada em cada ligação. No entanto, as chaves E2EE de contacto (`sym_key`) são estáticas ao longo de toda a relação — se forem comprometidas no futuro, todas as mensagens passadas cifradas com essa chave ficam expostas. Forward secrecy completa exigiria rotação periódica das chaves de contacto (ex.: protocolo Double Ratchet).
+**Forward secrecy incompleta face a Double Ratchet:** A rotação implementada é por evento/conversa, não por mensagem. Se uma chave de contacto for comprometida antes de uma nova rotação ser recebida pelo destinatário, as mensagens cifradas com essa chave continuam expostas. Uma protecção mais forte exigiria um protocolo de ratchet por mensagem, com encadeamento de chaves e recuperação após compromisso.
 
-**Rotação de chave de grupo na remoção de membro:** Quando um membro é removido de um grupo, a chave de grupo não é rotacionada. Um membro removido que tenha guardado a chave localmente continua a ser capaz de decifrar mensagens futuras se as obtiver por outros meios (o servidor já não lhas entrega, mas o risco permanece). Key rotation requereria que o administrador cifrasse uma nova chave para todos os membros restantes, implicando N operações GET_PUB_KEY — uma melhoria identificada mas não implementada.
+**Mensagens antigas após rotação:** O cliente mantém localmente a chave de contacto actual. Depois de uma rotação, mensagens antigas que ainda não tenham sido decifradas podem deixar de ser legíveis se dependerem da chave anterior. Um sistema completo teria de guardar versões de chaves por época ou associar cada mensagem a um identificador de chave.
 
 **Estado do servidor não cifrado:** O ficheiro `server_state.json` contém em plaintext o grafo de contactos entre utilizadores (UIDs), as listas de membros de grupos e os metadados de certificados. Um atacante com acesso ao disco do servidor pode inferir relações sociais, ainda que não consiga ler o conteúdo das mensagens. Cifrar o estado do servidor comprometeria a capacidade do servidor de processar pedidos, pelo que uma solução real exigiria uma base de dados com cifra ao nível das colunas ou um modelo de servidor oblivious.
 
@@ -326,7 +355,7 @@ O servidor armazena mensagens destinadas a utilizadores não ligados numa fila p
 O servidor funciona como CA self-signed usando Ed25519. No arranque, gera (ou carrega) um par de chaves de longa duração armazenado em `server/data/server_signing.pem`. No registo de cada utilizador, a CA emite um certificado digital:
 
 ```json
-{ "issued_at": <unix timestamp>, "pub_key": "<base64 X25519>", "uid": "<sha256 hex>" }
+{ "pub_key": "<base64 X25519>", "uid": "<sha256 hex>" }
 ```
 
 O JSON é serializado de forma canónica (chaves ordenadas lexicograficamente, sem espaços) para garantir que a assinatura é determinística e não depende da ordem de serialização. O certificado é armazenado no servidor e devolvido juntamente com a chave pública em resposta a pedidos `GET_PUB_KEY`.
@@ -337,15 +366,19 @@ O cliente verifica a assinatura Ed25519 em `common/ca.py` sempre que obtém a ch
 
 Os grupos têm um identificador único (UUID4 hex), um nome, um administrador e uma lista de membros. A chave de grupo (AES-256) é gerada pelo criador e distribuída a cada membro via ECDH efémero com domain separation (`info="group-key-exchange"`), garantindo E2EE mesmo para grupos. O servidor gere as filas de entrega por membro e aplica controlo de acesso (apenas membros podem enviar; apenas o administrador pode gerir membros). O histórico local de mensagens de grupo é armazenado cifrado, usando a mesma infraestrutura do `MessageStore`.
 
+### 6.4 Forward Secrecy Parcial
+
+Foi implementada rotação de chaves para conversas 1-para-1 e para grupos. Em conversas directas, ao abrir a conversa, o cliente gera uma nova chave simétrica e envia-a cifrada para o contacto através do comando `ROTATE_KEY`; o servidor guarda apenas o pacote cifrado em `key_rotations` até ao próximo `FETCH_MESSAGES` do destinatário. Em grupos, após remover um membro, o administrador gera uma nova `group_key`, cifra-a para todos os membros restantes e actualiza o servidor com `ROTATE_GROUP_KEY`.
+
+Esta solução não equivale a um Double Ratchet completo, mas limita a exposição de mensagens futuras após rotação e melhora a segurança relativamente ao modelo anterior, em que as chaves de contacto e de grupo permaneciam estáticas por toda a relação.
+
 ---
 
 ## 7. Funcionalidades Não Implementadas
 
-**Forward Secrecy completa (Double Ratchet):** Uma implementação completa exigiria a adopção de um protocolo de ratchet (semelhante ao Signal Protocol), com geração de novas chaves de sessão por mensagem e possibilidade de healing após comprometimento de uma chave. A arquitectura actual de chave simétrica estática por par de contactos não suporta isso sem alterações profundas ao modelo de dados e ao protocolo de handshake.
+**Forward Secrecy completa (Double Ratchet):** Uma implementação completa exigiria a adopção de um protocolo de ratchet (semelhante ao Signal Protocol), com geração de novas chaves por mensagem, chaves por época e possibilidade de healing após comprometimento de uma chave. A solução actual implementa rotação explícita de chaves, mas não um ratchet contínuo por mensagem.
 
 **Modo Descentralizado (PGP-like / P2P):** A arquitectura actual é intrinsecamente centralizada — o servidor é o único ponto de encontro entre clientes. Um modo P2P exigiria mecanismos de descoberta de endereços (ex.: NAT traversal, servidor de sinalização separado) e um protocolo de handshake directo entre clientes, representando uma mudança arquitectural significativa.
-
-**Rotação de chave de grupo na remoção de membro:** Como descrito na secção de limitações, a remoção de um membro não rota a chave de grupo. Uma implementação correcta desta feature requereria que o administrador obtivesse as chaves públicas de todos os membros restantes e re-cifrasse uma nova chave de grupo para cada um, o que implica N chamadas `GET_PUB_KEY` e distribui a carga para o cliente administrador.
 
 ---
 
