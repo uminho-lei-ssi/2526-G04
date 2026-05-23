@@ -6,6 +6,7 @@ from common.secureChannel import SecureChannel
 from server.state import ServerState
 from server import ca
 
+
 class ClientSession(threading.Thread):
     def __init__(self, ch: SecureChannel, addr, state: ServerState,
                  signing_key: Ed25519PrivateKey):
@@ -46,6 +47,7 @@ class ClientSession(threading.Thread):
             "REMOVE_CONTACT":      self._handle_remove_contact,
             "SEND_MESSAGE":        self._handle_send_message,
             "FETCH_MESSAGES":      self._handle_fetch_messages,
+            "ROTATE_KEY":          self._handle_rotate_key,
             "CREATE_GROUP":        self._handle_create_group,
             "GET_GROUPS":          self._handle_get_groups,
             "GET_GROUP_KEY":       self._handle_get_group_key,
@@ -53,6 +55,7 @@ class ClientSession(threading.Thread):
             "FETCH_GROUP_MESSAGES": self._handle_fetch_group_messages,
             "ADD_GROUP_MEMBER":    self._handle_add_group_member,
             "REMOVE_GROUP_MEMBER": self._handle_remove_group_member,
+            "ROTATE_GROUP_KEY":    self._handle_rotate_group_key,
         }
 
         cmd = str(message.get("type", "")).strip().upper()
@@ -67,10 +70,10 @@ class ClientSession(threading.Thread):
             self._send_response(False, f"ERRO comando desconhecido: {cmd}")
 
     def _handle_register(self, payload: dict):
-        user     = str(payload.get("username", "")).strip()  # hash do cliente
-        pwd      = str(payload.get("password", ""))
-        pub_key  = str(payload.get("pub_key",  "")).strip()
-        blob     = str(payload.get("blob", "")).strip()
+        user    = str(payload.get("username", "")).strip()
+        pwd     = str(payload.get("password", ""))
+        pub_key = str(payload.get("pub_key", "")).strip()
+        blob    = str(payload.get("blob", "")).strip()
 
         if not user or not pwd:
             return self._send_response(False, "ERRO username/password obrigatorios.")
@@ -80,10 +83,10 @@ class ClientSession(threading.Thread):
         cert_json, sig_b64 = ca.issue_certificate(user, pub_key, self.signing_key)
 
         if not self.state.register_user(user, pwd, pub_key, blob, cert_json, sig_b64):
-            return self._send_response(False, f"ERRO utilizador já existe.")
+            return self._send_response(False, "ERRO utilizador já existe.")
 
         print(f"  Registado: {user[:8]}...")
-        self._send_response(True, f"OK registo efetuado.")
+        self._send_response(True, "OK registo efetuado.")
 
     def _handle_login(self, payload: dict):
         user = str(payload.get("username", "")).strip()
@@ -100,22 +103,22 @@ class ClientSession(threading.Thread):
 
         self.username = user
         print(f"  Login: {user[:8]}...")
-        bundle = self.state.get_key_bundle(user) 
-        self._send_response(True, f"OK autenticado.", bundle)
+        bundle = self.state.get_key_bundle(user)
+        self._send_response(True, "OK autenticado.", bundle)
 
     def _handle_logout(self, message=None):
         if self.username:
             self.state.logout_user(self.username)
             self.username = None
-        self._send_response(True, f"OK sessao terminada.")
+        self._send_response(True, "OK sessao terminada.")
 
     def _handle_get_contacts(self, message=None):
         if not self._ensure_authenticated():
             return
-        contacts = self.state.get_contacts(self.username)
+        contacts     = self.state.get_contacts(self.username)
         contact_keys = self.state.pop_contact_keys(self.username)
         self._send_response(True, "OK lista de contactos.", {
-            "contacts":    contacts,
+            "contacts":     contacts,
             "contact_keys": contact_keys,
         })
 
@@ -127,7 +130,7 @@ class ClientSession(threading.Thread):
             return self._send_response(False, "ERRO UID obrigatorio.")
         pub_key = self.state.get_pub_key(target)
         if not pub_key:
-            return self._send_response(False, f"ERRO utilizador nao existe.")
+            return self._send_response(False, "ERRO utilizador nao existe.")
         cert_pair = self.state.get_cert(target)
         if not cert_pair:
             return self._send_response(False, "ERRO certificado nao disponivel.")
@@ -152,13 +155,10 @@ class ClientSession(threading.Thread):
         ok, message = self.state.add_contact(self.username, contact)
         if not ok:
             return self._send_response(ok, message)
-        
-        # Adicionar reciprocamente no estado
+
         self.state.add_contact(contact, self.username)
-
-        # Guardar chaves cifradas e o username opaco para handshake
-        self.state.store_contact_key(self.username, contact, enc_key_for_owner, enc_key_for_contact, enc_username)
-
+        self.state.store_contact_key(self.username, contact,
+                                     enc_key_for_owner, enc_key_for_contact, enc_username)
         self._send_response(True, message)
 
     def _handle_remove_contact(self, payload: dict):
@@ -190,14 +190,30 @@ class ClientSession(threading.Thread):
             return
         contact_value = payload.get("contact")
         contact = contact_value.strip() if isinstance(contact_value, str) else None
-        
-        messages     = self.state.pop_messages(self.username, contact or None)
-        contact_keys = self.state.pop_contact_keys(self.username)
-        
+
+        messages      = self.state.pop_messages(self.username, contact or None)
+        contact_keys  = self.state.pop_contact_keys(self.username)
+        key_rotations = self.state.pop_key_rotations(self.username)
+
         self._send_response(True, "OK sincronizacao concluida.", {
-            "messages":     messages,
-            "contact_keys": contact_keys,
+            "messages":      messages,
+            "contact_keys":  contact_keys,
+            "key_rotations": key_rotations,
         })
+
+    # ------------------------------------------------------------------ #
+    # Forward Secrecy — 1-para-1                                         #
+    # ------------------------------------------------------------------ #
+
+    def _handle_rotate_key(self, payload: dict):
+        if not self._ensure_authenticated():
+            return
+        recipient = str(payload.get("to", "")).strip()
+        enc_blob  = str(payload.get("enc_key", "")).strip()
+        if not recipient or not enc_blob:
+            return self._send_response(False, "ERRO dados incompletos.")
+        ok, msg = self.state.store_key_rotation(self.username, recipient, enc_blob)
+        self._send_response(ok, msg)
 
     # ------------------------------------------------------------------ #
     # Grupos                                                             #
@@ -225,8 +241,7 @@ class ClientSession(threading.Thread):
     def _handle_get_groups(self, message=None):
         if not self._ensure_authenticated():
             return
-        uid    = self.username
-        groups = self.state.get_groups_for_user(uid)
+        groups = self.state.get_groups_for_user(self.username)
         self._send_response(True, "OK grupos obtidos.", {"groups": groups})
 
     def _handle_get_group_key(self, payload: dict):
@@ -279,6 +294,20 @@ class ClientSession(threading.Thread):
             return self._send_response(False, "ERRO dados incompletos.")
         ok, msg = self.state.remove_group_member(gid, self.username, target)
         self._send_response(ok, msg)
+
+    def _handle_rotate_group_key(self, payload: dict):
+        if not self._ensure_authenticated():
+            return
+        gid      = str(payload.get("group_id", "")).strip()
+        enc_keys = payload.get("enc_keys", {})
+        if not gid or not isinstance(enc_keys, dict) or not enc_keys:
+            return self._send_response(False, "ERRO dados incompletos.")
+        ok, msg = self.state.rotate_group_key(gid, self.username, enc_keys)
+        self._send_response(ok, msg)
+
+    # ------------------------------------------------------------------ #
+    # Helpers                                                            #
+    # ------------------------------------------------------------------ #
 
     def _ensure_authenticated(self) -> bool:
         if self.username:

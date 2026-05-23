@@ -11,18 +11,18 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.constant_time import bytes_eq
 
 
-_STATE_PATH      = "server/data/server_state.json"
+_STATE_PATH = "server/data/server_state.json"
 
 
 class ServerState:
     def __init__(self):
-
-        self._users:          dict[str, dict]                    = {}
+        self._users:          dict[str, dict]                   = {}
         self._online:         dict[str, object]                 = {}
         self._offline:        dict[str, list[dict]]             = {}
         self._contact_keys:   dict[str, dict[str, str]]         = {}
         self._groups:         dict[str, dict]                   = {}
         self._group_messages: dict[str, dict[str, list[dict]]]  = {}
+        self._key_rotations:  dict[str, dict[str, str]]         = {}  
 
         self._lock = threading.Lock()
         self._load_from_disk()
@@ -34,9 +34,6 @@ class ServerState:
     def register_user(self, username: str, password: str,
                       pub_key: str, blob: str,
                       cert: str = "", sig: str = "") -> bool:
-        """
-        Recebe a pub_key, o blob (salt + nonce + enc_seed) e o certificado CA.
-        """
         with self._lock:
             if username in self._users:
                 return False
@@ -64,13 +61,12 @@ class ServerState:
             return self._verify_password(password, stored)
 
     def get_key_bundle(self, username: str) -> dict | None:
-        """Devolve a pub_key e o blob para o cliente sincronizar o cofre."""
         with self._lock:
             user = self._users.get(username)
             if not user:
                 return None
             return {
-                "pub_key": user.get("pub_key", ""), 
+                "pub_key": user.get("pub_key", ""),
                 "blob":    user.get("blob", "")
             }
 
@@ -80,7 +76,6 @@ class ServerState:
             return user.get("pub_key") if user else None
 
     def get_cert(self, username: str) -> tuple[str, str] | None:
-        """Devolve (cert_json, sig_b64) ou None se não existir."""
         with self._lock:
             user = self._users.get(username)
             if not user:
@@ -126,7 +121,7 @@ class ServerState:
                 return False, "ERRO contacto ja existe na lista."
             contacts.add(contact)
             self._persist_locked()
-            return True, f"OK contacto adicionado."
+            return True, "OK contacto adicionado."
 
     def remove_contact(self, owner: str, contact: str) -> tuple[bool, str]:
         with self._lock:
@@ -139,21 +134,15 @@ class ServerState:
             self._persist_locked()
             return True, f"OK contacto {contact!r} removido."
 
-    def store_contact_key(self, owner: str, contact: str, enc_key_owner: str, enc_key_contact: str, enc_username: str):
-        """
-        Armazena os pacotes para o handshake E2EE assíncrono.
-        owner: quem está a adicionar (remetente)
-        contact: quem está a ser adicionado (destinatário)
-        """
+    def store_contact_key(self, owner: str, contact: str,
+                          enc_key_owner: str, enc_key_contact: str,
+                          enc_username: str):
         with self._lock:
-            # para destino - ECDH + username cifrado
             self._contact_keys.setdefault(contact, {})[owner] = {
                 "type": "ecdh",
                 "key": enc_key_contact,
                 "enc_username": enc_username
             }
-            
-            # para remetente - key cifrada para sincronizar novos dispositivos
             self._contact_keys.setdefault(owner, {})[contact] = {
                 "type": "owner",
                 "key": enc_key_owner,
@@ -162,14 +151,11 @@ class ServerState:
             self._persist_locked()
 
     def pop_contact_keys(self, username: str) -> dict[str, dict]:
-        """
-        Retorna as chaves de contactos registadas do user.
-        """
         with self._lock:
-            keys = dict(self._contact_keys.get(username, {}))
-            return keys
+            return dict(self._contact_keys.get(username, {}))
 
-    def queue_message(self, sender: str, recipient: str, content: str) -> tuple[bool, str]:
+    def queue_message(self, sender: str, recipient: str,
+                      content: str) -> tuple[bool, str]:
         with self._lock:
             if sender not in self._users:
                 return False, "ERRO remetente invalido."
@@ -183,33 +169,44 @@ class ServerState:
             self._persist_locked()
             return True, "OK mensagem enfileirada."
 
-    def pop_messages(self, username: str, contact: str | None = None, last_id : int | None = None) -> list[dict]:
-        """
-        Retorna as mensagens guardadas no server para historico do cliente.
-        Em caso de omissão de contacto, envia de todos.
-        Em caso de omissão de last_id, envia todas as mensagens do contacto.
-        """
-
+    def pop_messages(self, username: str, contact: str | None = None,
+                     last_id: int | None = None) -> list[dict]:
         with self._lock:
             all_messages = self._offline.get(username, [])
             if not all_messages:
                 return []
-
             cursor = last_id if last_id is not None else 0
-
-            # filtrar as mensagens que o cliente ainda não viu com 'id' incremental (por implementar a 100%)
             selected = []
             for m in all_messages:
-                id_match = m.get('id', 0) > cursor
-                contact_match = (contact is None or m.get('from') == contact)
-                
+                id_match      = m.get("id", 0) > cursor
+                contact_match = (contact is None or m.get("from") == contact)
                 if id_match and contact_match:
                     selected.append(m)
-
-            # Neste momento, persiste-se tudo
             self._persist_locked()
-
             return selected
+
+    # ------------------------------------------------------------------ #
+    # Forward Secrecy — rotação de chaves de sessão (1-para-1)           #
+    # ------------------------------------------------------------------ #
+
+    def store_key_rotation(self, sender: str, recipient: str,
+                           enc_blob: str) -> tuple[bool, str]:
+        with self._lock:
+            if recipient not in self._users:
+                return False, "ERRO destinatario nao existe."
+            contacts = self._users.get(sender, {}).get("contacts", set())
+            if recipient not in contacts:
+                return False, "ERRO destinatario fora dos contactos."
+            self._key_rotations.setdefault(recipient, {})[sender] = enc_blob
+            self._persist_locked()
+            return True, "OK rotacao de chave registada."
+
+    def pop_key_rotations(self, username: str) -> dict[str, str]:
+        with self._lock:
+            rotations = dict(self._key_rotations.pop(username, {}))
+            if rotations:
+                self._persist_locked()
+            return rotations
 
     # ------------------------------------------------------------------ #
     # Grupos                                                             #
@@ -217,7 +214,6 @@ class ServerState:
 
     def create_group(self, name: str, admin: str,
                      members: list[str], enc_keys: dict[str, str]) -> str | None:
-        """Cria grupo. Devolve group_id ou None se algum membro não existir."""
         with self._lock:
             for m in members:
                 if m not in self._users:
@@ -315,31 +311,42 @@ class ServerState:
             self._persist_locked()
             return True, "OK membro removido."
 
+    def rotate_group_key(self, group_id: str, requester: str,
+                         new_enc_keys: dict[str, str]) -> tuple[bool, str]:
+        with self._lock:
+            g = self._groups.get(group_id)
+            if not g:
+                return False, "ERRO grupo nao existe."
+            if g["admin"] != requester:
+                return False, "ERRO apenas o administrador pode rodar a chave."
+            if set(new_enc_keys.keys()) != g["members"]:
+                return False, "ERRO enc_keys nao corresponde aos membros actuais."
+            g["enc_keys"] = new_enc_keys
+            self._persist_locked()
+            return True, "OK chave de grupo rotacionada."
+
     # ------------------------------------------------------------------ #
     # Persistência                                                       #
     # ------------------------------------------------------------------ #
 
     def _persist_locked(self):
-        """Grava o estado diretamente em JSON."""
         os.makedirs(os.path.dirname(_STATE_PATH), exist_ok=True)
-        
-        # conversao para lista para permitir serializar em JSON
+
         users_serial = {
             uname: {**u, "contacts": list(u.get("contacts", []))}
             for uname, u in self._users.items()
         }
-
         groups_serial = {
             gid: {**g, "members": list(g.get("members", []))}
             for gid, g in self._groups.items()
         }
-
         state_data = {
             "users":          users_serial,
             "offline":        self._offline,
             "contact_keys":   self._contact_keys,
             "groups":         groups_serial,
             "group_messages": self._group_messages,
+            "key_rotations":  self._key_rotations,
         }
         try:
             with open(_STATE_PATH, "w", encoding="utf-8") as f:
@@ -348,15 +355,11 @@ class ServerState:
             print(f"[-] Erro ao persistir estado em disco: {e}")
 
     def _load_from_disk(self):
-        """Carrega o estado a partir do ficheiro JSON plaintext."""
         if not os.path.exists(_STATE_PATH):
             return
-
         try:
             with open(_STATE_PATH, "r", encoding="utf-8") as f:
                 state_data = json.load(f)
-                
-            # conversao para set para deteção agilizada de dups
             self._users = {
                 uname: {**u, "contacts": set(u.get("contacts", []))}
                 for uname, u in state_data.get("users", {}).items()
@@ -368,10 +371,11 @@ class ServerState:
                 for gid, g in state_data.get("groups", {}).items()
             }
             self._group_messages = state_data.get("group_messages", {})
+            self._key_rotations  = state_data.get("key_rotations", {})
         except (OSError, json.JSONDecodeError) as e:
             print(f"[-] Erro ao carregar estado: {e}. A iniciar base de dados limpa.")
             self._users, self._offline, self._contact_keys = {}, {}, {}
-
+            self._groups, self._group_messages, self._key_rotations = {}, {}, {}
 
     # ------------------------------------------------------------------ #
     # Passwords                                                           #
@@ -380,7 +384,8 @@ class ServerState:
     def _hash_password(self, password: str) -> dict:
         salt = os.urandom(16)
         iterations = 150_000
-        kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=iterations)
+        kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32,
+                         salt=salt, iterations=iterations)
         digest = kdf.derive(password.encode())
         return {
             "algorithm":  "pbkdf2-sha256",
@@ -395,14 +400,15 @@ class ServerState:
         iterations = stored.get("iterations")
         salt_b64   = stored.get("salt")
         hash_b64   = stored.get("hash")
-        if not isinstance(iterations, int) or not isinstance(salt_b64, str) or not isinstance(hash_b64, str):
+        if not isinstance(iterations, int) or not isinstance(salt_b64, str) \
+                or not isinstance(hash_b64, str):
             return False
         try:
             salt     = base64.b64decode(salt_b64)
             expected = base64.b64decode(hash_b64)
         except (ValueError, TypeError):
             return False
-        kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=iterations)
+        kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32,
+                         salt=salt, iterations=iterations)
         got = kdf.derive(password.encode())
         return bytes_eq(got, expected)
-    
