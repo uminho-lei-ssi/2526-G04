@@ -1,19 +1,21 @@
 """
-client/keystore.py
+client/storage/keystore.py
 
-Identidade: par X25519 por utilizador.
-  - Privada cifrada com AES-256-GCM (chave derivada da password via PBKDF2)
-  - Pública registada no servidor
+Modelo Híbrido: Master Seed Aleatória
+  - Master Seed (32 bytes) cifrada com AES-256-GCM (chave derivada da password via PBKDF2)
+  - Identidade: par X25519 derivado da Master Seed via HKDF (info="identity-key")
+  - Armazenamento de contactos: chave AES-256 derivada da Master Seed via HKDF (info="contact-key-storage")
 
-Chaves de contactos: chave AES-256 por par (owner, contact)
-  - Cifrada com AES-256-GCM usando chave derivada da privada do owner via HKDF
-  - Só o owner (com a sua priv) consegue recuperar
+Identificador público: SHA-256(username) em hex — username partilhado fora de banda para adicionar contactos.
+  - Determinístico: qualquer dispositivo calcula o mesmo valor
 
-Ficheiro de identidade: <keys_dir>/<username>.json
-Ficheiro de contactos:  <keys_dir>/<username>_contacts.json
+Ficheiro de identidade:  <keys_dir>/<username>.json
+Ficheiro de contactos:   <keys_dir>/<username>_contacts.json
+  { "uid": { "nonce": b64, "enc_key": b64, "username": str | null } }
 """
 
 import base64
+import hashlib
 import json
 import os
 
@@ -34,23 +36,29 @@ class KeyStore:
 
     def _contacts_path(self, username: str) -> str:
         return os.path.join(self.keys_dir, f"{username.replace(os.sep, '_')}_contacts.json")
+    
+    @staticmethod
+    def username_to_uid(username: str) -> str:
+        """SHA-256(username) em hex — identificador público opaco."""
+        return hashlib.sha256(username.encode()).hexdigest()
 
     @staticmethod
     def _derive_key_from_password(password: str, salt: bytes) -> bytes:
-        # PBKDF2: torna a password num segredo de 32 bytes resistente a brute-force
         kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=150_000)
         return kdf.derive(password.encode())
 
     @staticmethod
-    def _derive_key_from_priv(priv: X25519PrivateKey) -> bytes:
-        # HKDF sobre os bytes raw da privada - chave AES-256 dedicada ao armazenamento de contactos
-        # info diferente do handshake garante que esta chave nunca é usada para outro fim
-        priv_bytes = priv.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
-        return HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
-                    info=b"contact-key-storage").derive(priv_bytes)
+    def _derive_identity_from_seed(seed: bytes) -> X25519PrivateKey:
+        hkdf = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"identity-key")
+        return X25519PrivateKey.from_private_bytes(hkdf.derive(seed))
+
+    @staticmethod
+    def _derive_storage_key_from_seed(seed: bytes) -> bytes:
+        hkdf = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"contact-key-storage")
+        return hkdf.derive(seed)
 
     # ------------------------------------------------------------------ #
-    # Identidade                                                          #
+    # Identidade / Master Seed                                           #
     # ------------------------------------------------------------------ #
 
     def has_local_keys(self, username: str) -> bool:
@@ -63,47 +71,45 @@ class KeyStore:
 
     def generate_and_save(self, username: str, password: str) -> tuple[str, str]:
         """
-        Gera par X25519, cifra a privada com a password e guarda em disco.
-        Devolve (pub_b64, blob_b64) para enviar ao servidor.
-        blob = base64(salt[16] + nonce[12] + enc_priv)
+        Gera Master Seed, deriva par X25519, cifra seed com password e guarda.
+        Devolve (pub_b64, blob_b64) para enviar ao servidor no registo.
+        blob = base64(salt[16] + nonce[12] + enc_seed)
         """
         os.makedirs(self.keys_dir, exist_ok=True)
 
-        priv      = X25519PrivateKey.generate()
-        priv_bytes = priv.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
-        pub_bytes  = priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        master_seed = os.urandom(32)
+        priv        = self._derive_identity_from_seed(master_seed)
+        pub_bytes   = priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
 
         salt     = os.urandom(16)
         nonce    = os.urandom(12)
-        enc_priv = AESGCM(self._derive_key_from_password(password, salt)).encrypt(nonce, priv_bytes, None)
+        enc_seed = AESGCM(self._derive_key_from_password(password, salt)).encrypt(nonce, master_seed, None)
 
         with open(self._key_path(username), "w") as f:
             json.dump({
                 "pub":      base64.b64encode(pub_bytes).decode(),
                 "salt":     base64.b64encode(salt).decode(),
                 "nonce":    base64.b64encode(nonce).decode(),
-                "enc_priv": base64.b64encode(enc_priv).decode(),
+                "enc_seed": base64.b64encode(enc_seed).decode(),
             }, f, indent=2)
 
-        pub_b64  = base64.b64encode(pub_bytes).decode()
-        blob_b64 = base64.b64encode(salt + nonce + enc_priv).decode()
-        return pub_b64, blob_b64
+        return base64.b64encode(pub_bytes).decode(), base64.b64encode(salt + nonce + enc_seed).decode()
 
     def save_from_server(self, username: str, pub_b64: str, blob_b64: str):
         """Guarda chaves recebidas do servidor (novo dispositivo)."""
         os.makedirs(self.keys_dir, exist_ok=True)
         raw  = base64.b64decode(blob_b64)
-        salt, nonce, enc_priv = raw[:16], raw[16:28], raw[28:]
+        salt, nonce, enc_seed = raw[:16], raw[16:28], raw[28:]
         with open(self._key_path(username), "w") as f:
             json.dump({
                 "pub":      pub_b64,
                 "salt":     base64.b64encode(salt).decode(),
                 "nonce":    base64.b64encode(nonce).decode(),
-                "enc_priv": base64.b64encode(enc_priv).decode(),
+                "enc_seed": base64.b64encode(enc_seed).decode(),
             }, f, indent=2)
 
-    def load_private_key(self, username: str, password: str) -> X25519PrivateKey:
-        """Decifra e devolve a chave privada X25519. Lança ValueError se a password for errada."""
+    def load_master_seed(self, username: str, password: str) -> bytes:
+        """Decifra e devolve a Master Seed. Lança ValueError se a password for errada."""
         path = self._key_path(username)
         if not os.path.exists(path):
             raise ValueError(f"Sem chaves locais para '{username}'.")
@@ -113,136 +119,140 @@ class KeyStore:
 
         salt     = base64.b64decode(d["salt"])
         nonce    = base64.b64decode(d["nonce"])
-        enc_priv = base64.b64decode(d["enc_priv"])
+        enc_seed = base64.b64decode(d["enc_seed"])
 
         try:
-            priv_bytes = AESGCM(self._derive_key_from_password(password, salt)).decrypt(nonce, enc_priv, None)
+            return AESGCM(self._derive_key_from_password(password, salt)).decrypt(nonce, enc_seed, None)
         except Exception:
             raise ValueError("Password incorrecta ou ficheiro de chaves corrompido.")
-
-        return X25519PrivateKey.from_private_bytes(priv_bytes)
 
     def load_public_key_bytes(self, username: str) -> bytes:
         with open(self._key_path(username)) as f:
             return base64.b64decode(json.load(f)["pub"])
 
     # ------------------------------------------------------------------ #
-    # Chaves de contactos                                                #
+    # Resolução UID - username                                           #
     # ------------------------------------------------------------------ #
 
-    def receive_contact_key(self, owner: str, sender: str,
-                             enc_blob_b64: str, owner_priv: X25519PrivateKey):
-        """
-        Decifra a chave simétrica enviada por `sender` e guarda localmente.
-        enc_blob = base64(eph_pub[32] + nonce[12] + enc_key)
-        """
-        raw      = base64.b64decode(enc_blob_b64)
-        eph_pub  = X25519PublicKey.from_public_bytes(raw[:32])
-        nonce    = raw[32:44]
-        enc_key  = raw[44:]
- 
+    def _load_contacts(self, owner: str) -> dict:
+        path = self._contacts_path(owner)
+        if not os.path.exists(path):
+            return {}
+        with open(path) as f:
+            return json.load(f)
+
+    def _save_contacts(self, owner: str, data: dict):
+        os.makedirs(self.keys_dir, exist_ok=True)
+        with open(self._contacts_path(owner), "w") as f:
+            json.dump(data, f, indent=2)
+
+    def save_contact_username(self, owner: str, contact: str, username: str):
+        """Guarda o username real de um contacto após troca cifrada."""
+        data = self._load_contacts(owner)
+        if contact not in data:
+            data[contact] = {}
+        data[contact]["username"] = username
+        self._save_contacts(owner, data)
+
+    def resolve_uid(self, owner: str, uid: str) -> str | None:
+        """Devolve o username local de um UID, ou None se ainda não resolvido."""
+        return self._load_contacts(owner).get(uid, {}).get("username")
+
+    def resolve_username_to_uid(self, owner: str, username: str) -> str | None:
+        """Devolve o UID correspondente a um username local ou calcula diretamente."""
+        # primeiro tenta pelo ficheiro de contactos para confirmar se ja existe
+        data = self._load_contacts(owner)
+        for uid, entry in data.items():
+            if isinstance(entry, dict) and entry.get("username") == username:
+                return uid
+        # Fallback: calcular directamente
+        return self.username_to_uid(username)
+
+    # ------------------------------------------------------------------ #
+    # Chaves de contactos                                                 #
+    # ------------------------------------------------------------------ #
+
+    def receive_contact_key(self, owner: str, sender_uid: str,
+                            enc_blob_b64: str, master_seed: bytes):
+        """Decifra chave simétrica enviada via ECDH e guarda localmente."""
+        owner_priv = self._derive_identity_from_seed(master_seed)
+
+        raw     = base64.b64decode(enc_blob_b64)
+        eph_pub = X25519PublicKey.from_public_bytes(raw[:32])
+        nonce   = raw[32:44]
+        enc_key = raw[44:]
+
         shared  = owner_priv.exchange(eph_pub)
         aes_key = HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
                        info=b"contact-key-exchange").derive(shared)
- 
-        sym_key = AESGCM(aes_key).decrypt(nonce, enc_key, None)
-        self.save_contact_key(owner, sender, sym_key, owner_priv)
 
-    def receive_owner_key(self, owner: str, contact_name: str,
-                             blob: str, owner_priv: X25519PrivateKey):
-        """
-        Decifra chave simétrica de quem adicionou o contacto e guarda localmente.
-        """
-        aes_key_storage = self._derive_key_from_priv(owner_priv)
+        sym_key = AESGCM(aes_key).decrypt(nonce, enc_key, None)
+        self.save_contact_key(owner, sender_uid, sym_key, master_seed)
+
+    def receive_owner_key(self, owner: str, contact: str,
+                          blob: str, master_seed: bytes):
+        """Decifra chave simétrica cifrada com a storage key e guarda localmente."""
+        aes_key_storage = self._derive_storage_key_from_seed(master_seed)
         raw = base64.b64decode(blob)
         nonce, enc_key = raw[:12], raw[12:]
         sym_key = AESGCM(aes_key_storage).decrypt(nonce, enc_key, None)
-                    
-        self.save_contact_key(
-            owner, contact_name, sym_key, owner_priv
-        )
+        self.save_contact_key(owner, contact, sym_key, master_seed)
 
     def save_contact_key(self, owner: str, contact: str,
-                         sym_key: bytes, owner_priv: X25519PrivateKey) -> str:
-        """
-        Cifra sym_key com AES-GCM usando chave derivada da priv do owner e guarda em disco.
-        Devolve o blob cifrado.
-        Formato: { contact: { nonce: b64, enc_key: b64 } }
-        """
-        aes_key = self._derive_key_from_priv(owner_priv)
+                         sym_key: bytes, master_seed: bytes) -> str:
+        """Cifra sym_key com a storage key e guarda. Devolve base64(nonce+enc_key)."""
+        aes_key_storage = self._derive_storage_key_from_seed(master_seed)
         nonce   = os.urandom(12)
-        enc_key = AESGCM(aes_key).encrypt(nonce, sym_key, None)
+        enc_key = AESGCM(aes_key_storage).encrypt(nonce, sym_key, None)
 
-        path = self._contacts_path(owner)
-        data = {}
-        if os.path.exists(path):
-            with open(path) as f:
-                data = json.load(f)
-
-        data[contact] = {
-            "nonce":   base64.b64encode(nonce).decode(),
-            "enc_key": base64.b64encode(enc_key).decode(),
-        }
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2)
+        data = self._load_contacts(owner)
+        if contact not in data:
+            data[contact] = {}
+        data[contact]["nonce"]   = base64.b64encode(nonce).decode()
+        data[contact]["enc_key"] = base64.b64encode(enc_key).decode()
+        self._save_contacts(owner, data)
 
         return base64.b64encode(nonce + enc_key).decode()
 
     def get_contact_key(self, owner: str, contact: str,
-                        owner_priv: X25519PrivateKey) -> bytes | None:
-        """Decifra e devolve a chave simétrica do contacto usando a priv do owner."""
-        path = self._contacts_path(owner)
-        if not os.path.exists(path):
+                        master_seed: bytes) -> bytes | None:
+        """Decifra e devolve a chave simétrica do contacto."""
+        entry = self._load_contacts(owner).get(contact)
+        if not entry or "nonce" not in entry:
             return None
 
-        with open(path) as f:
-            data = json.load(f)
-
-        entry = data.get(contact)
-        if not entry:
-            return None
-
-        aes_key = self._derive_key_from_priv(owner_priv)
-        nonce   = base64.b64decode(entry["nonce"])
-        enc_key = base64.b64decode(entry["enc_key"])
-
+        aes_key_storage = self._derive_storage_key_from_seed(master_seed)
         try:
-            return AESGCM(aes_key).decrypt(nonce, enc_key, None)
+            return AESGCM(aes_key_storage).decrypt(
+                base64.b64decode(entry["nonce"]),
+                base64.b64decode(entry["enc_key"]),
+                None
+            )
         except Exception:
             return None
 
     def generate_contact_key(self, owner: str, contact: str,
                               contact_pub_b64: str,
-                              owner_priv: X25519PrivateKey) -> tuple[str,str]:
+                              master_seed: bytes) -> tuple[str, str]:
         """
-        Gera chave AES-256 para comunicação com `contact`.
-        1. Guarda-a cifrada com chave derivada da priv do owner (para o owner recuperar depois)
-        2. Cifra-a com a pub_key do contact via ECDH para enviar ao servidor
-           O contact decifra com a sua priv quando receber.
-
+        Gera chave AES-256 para comunicação com contact.
         Devolve (enc_for_contact, enc_for_self).
-        enc_for_contact = base64(eph_pub[32] + nonce[12] + enc_key)
+        enc_for_contact = base64(eph_pub[32] + nonce[12] + enc_key)   — ECDH
+        enc_for_self    = base64(nonce[12] + enc_key)                 — storage key
         """
-        sym_key = os.urandom(32)
+        sym_key      = os.urandom(32)
+        enc_for_self = self.save_contact_key(owner, contact, sym_key, master_seed)
 
-        # Guardar para o owner
-        enc_for_self = self.save_contact_key(owner, contact, sym_key, owner_priv)
-
-        # Cifrar para o contact: ECDH entre chave efemera e pub do contact
         contact_pub = X25519PublicKey.from_public_bytes(base64.b64decode(contact_pub_b64))
         eph_priv    = X25519PrivateKey.generate()
-        eph_pub     = eph_priv.public_key()
-        shared  = eph_priv.exchange(contact_pub)
+        shared      = eph_priv.exchange(contact_pub)
 
-        # Como o protocolo não permite cifrar com a chave publica do contacto diretamente
-        # temos de derivar uma chave AES com um shared por DH para cifrar
-        # O contacto pode entao recalcular shared e derivar a chave AES
         aes_key = HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
                        info=b"contact-key-exchange").derive(shared)
         nonce   = os.urandom(12)
         enc_key = AESGCM(aes_key).encrypt(nonce, sym_key, None)
 
-        eph_pub_bytes   = eph_pub.public_bytes(Encoding.Raw, PublicFormat.Raw)
+        eph_pub_bytes   = eph_priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
         enc_for_contact = base64.b64encode(eph_pub_bytes + nonce + enc_key).decode()
 
         return enc_for_contact, enc_for_self

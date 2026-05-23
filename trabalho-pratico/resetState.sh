@@ -8,14 +8,12 @@
 echo "--- A iniciar limpeza total do estado do projeto ---"
 
 # Definir caminhos
-CLIENT_KEYS="client/data/keys"
-CLIENT_MSGS="client/data/messages"
+CLIENT_STATE="client/data"
 SERVER_STATE="server/data"
 
 # Limpar dados do Cliente
 echo "Limpando chaves e mensagens do cliente... "
-rm -rf "$CLIENT_KEYS"/* 2>/dev/null
-rm -rf "$CLIENT_MSGS"/* 2>/dev/null
+rm -rf "$CLIENT_STATE"/* 2>/dev/null
 rm -rf "$SERVER_STATE"/* 2>/dev/null
 echo "OK"
 
