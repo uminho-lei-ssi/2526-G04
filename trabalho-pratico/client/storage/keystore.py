@@ -284,7 +284,7 @@ class KeyStore:
         enc_for_self    = base64(nonce[12] + enc_key)                 — storage key
         """
         sym_key      = os.urandom(32)
-        enc_for_self = self.save_contact_key(owner, contact, self._master_seed)
+        enc_for_self = self.save_contact_key(owner, contact, sym_key)
 
         contact_pub = X25519PublicKey.from_public_bytes(base64.b64decode(contact_pub_b64))
         eph_priv    = X25519PrivateKey.generate()
