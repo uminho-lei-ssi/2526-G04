@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 
@@ -11,19 +12,22 @@ class ClientController:
     def __init__(self, ch: SecureChannel, keystore: KeyStore,
                  message_store: MessageStore, server_signing_pub: bytes):
         self._ch                 = ch
-        self._username:  str | None = None
-        self._keystore   = keystore
-        self._msg_store  = message_store
+        self._username: str | None = None
+        self._keystore           = keystore
+        self._msg_store          = message_store
         self._server_signing_pub = server_signing_pub
+
+    # ------------------------------------------------------------------ #
+    # Autenticação                                                        #
+    # ------------------------------------------------------------------ #
 
     def register(self, username: str, password: str) -> tuple[bool, str]:
         try:
             pub_b64, blob = self._keystore.generate_and_save(username, password)
         except Exception as e:
             return False, f"Erro ao gerar chaves: {e}"
-        
-        hash_username = self._keystore.username_to_uid(username)
 
+        hash_username = self._keystore.username_to_uid(username)
         ok, message, _ = self._request({
             "type":     "REGISTER",
             "username": hash_username,
@@ -31,10 +35,8 @@ class ClientController:
             "pub_key":  pub_b64,
             "blob":     blob,
         })
-
         if not ok:
             self._keystore.delete_local_keys(username)
-
         return ok, message
 
     def login(self, username: str, password: str) -> tuple[bool, str]:
@@ -44,36 +46,37 @@ class ClientController:
             "username": hash_username,
             "password": password,
         })
-
         if not ok:
             return ok, message
 
         try:
-            self._keystore.save_from_server(username, data.get("pub_key", ""), data.get("blob", ""))
+            self._keystore.save_from_server(username, data.get("pub_key", ""),
+                                            data.get("blob", ""))
             seed = self._keystore.load_master_seed(username, password)
-            # regista seed no keystore para uso por outros métodos
             self._keystore.set_active_user(username, seed)
         except ValueError as e:
             return False, f"Erro ao carregar chaves: {e}"
 
         self._username = username
 
-        # Processar chaves e usernames pendentes ao fazer login
         _, _, data = self._request({"type": "FETCH_MESSAGES"})
         self._process_contact_keys(data.get("contact_keys", {}))
+        self._process_key_rotations(data.get("key_rotations", {}))
 
         return ok, message
 
     def logout(self) -> tuple[bool, str]:
         ok, message, _ = self._request({"type": "LOGOUT"})
         if ok:
-            # limpar seed activo e ficheiros locais via KeyStore
             self._keystore.clear_active_user()
-            self._username    = None
+            self._username = None
         return ok, message
 
+    # ------------------------------------------------------------------ #
+    # Contactos                                                           #
+    # ------------------------------------------------------------------ #
+
     def get_contacts(self) -> list[str]:
-        """Devolve lista de usernames resolvidos."""
         ok, _, data = self._request({"type": "GET_CONTACTS"})
         if not ok:
             return []
@@ -82,14 +85,7 @@ class ClientController:
         return [self._keystore.resolve_uid(self._username, u) or u for u in uids]
 
     def add_contact(self, contact: str) -> tuple[bool, str]:
-        """
-        Aceita o `contact` que o utilizador introduz (nome visível) ou um `uid`.
-        Resolve para `uid` antes de contactar o servidor.
-        """
-        # Resolver para UID (ou calcular se for um nome novo)
         uid = self._keystore.resolve_username_to_uid(self._username, contact) or contact
-
-        # Prevenir adicionar a si mesmo
         if uid == self._keystore.username_to_uid(self._username):
             return False, "Não pode adicionar-se a si mesmo."
 
@@ -113,12 +109,10 @@ class ClientController:
 
         try:
             enc_for_contact, enc_for_self = self._keystore.generate_contact_key(
-                self._username, uid, contact_pub_b64
-            )
+                self._username, uid, contact_pub_b64)
         except Exception as e:
             return False, f"Erro ao gerar chave de contacto: {e}"
 
-        # Cifrar o nosso username para o contacto o conhecer
         sym_key      = self._keystore.get_contact_key(self._username, uid)
         enc_username = self._msg_store.encrypt_message(self._username, sym_key)
 
@@ -129,17 +123,18 @@ class ClientController:
             "enc_key_for_contact": enc_for_contact,
             "enc_username":        enc_username,
         })
-
         if ok:
-            # owner conhece username, guarda logo
             self._keystore.save_contact_username(self._username, uid, contact)
-
         return ok, message
 
     def remove_contact(self, contact: str) -> tuple[bool, str]:
         uid = self._keystore.resolve_username_to_uid(self._username, contact) or contact
         ok, message, _ = self._request({"type": "REMOVE_CONTACT", "contact": uid})
         return ok, message
+
+    # ------------------------------------------------------------------ #
+    # Mensagens 1-para-1                                                  #
+    # ------------------------------------------------------------------ #
 
     def send_message(self, recipient: str, content: str) -> tuple[bool, str]:
         uid     = self._keystore.resolve_username_to_uid(self._username, recipient) or recipient
@@ -148,13 +143,11 @@ class ClientController:
             return False, f"Sem chave de sessão para '{recipient}'."
 
         e2ee_payload = self._msg_store.encrypt_message(content, sym_key)
-
         ok, message, _ = self._request({
             "type":    "SEND_MESSAGE",
             "to":      uid,
             "content": e2ee_payload,
         })
-
         if ok:
             self._msg_store.append_ciphered(self._username, recipient,
                                             self._username, content, sym_key)
@@ -162,11 +155,11 @@ class ClientController:
 
     def fetch_messages(self, contact: str) -> list[dict]:
         uid = self._keystore.resolve_username_to_uid(self._username, contact) or contact
-
         ok, _, data = self._request({"type": "FETCH_MESSAGES", "contact": uid})
 
         if ok:
             self._process_contact_keys(data.get("contact_keys", {}))
+            self._process_key_rotations(data.get("key_rotations", {}))
 
             sym_key = self._keystore.get_contact_key(self._username, uid)
             if sym_key:
@@ -176,7 +169,8 @@ class ClientController:
                     plaintext = self._msg_store.decrypt_message(m.get("content", ""), sym_key)
                     if plaintext is not None:
                         sender_uid = m.get("from", uid)
-                        sender     = self._keystore.resolve_uid(self._username, sender_uid) or sender_uid
+                        sender     = self._keystore.resolve_uid(self._username, sender_uid) \
+                                     or sender_uid
                         self._msg_store.append_ciphered(
                             self._username, contact,
                             sender, plaintext,
@@ -188,66 +182,68 @@ class ClientController:
             return []
         return self._msg_store.load_all(self._username, contact, sym_key)
 
-    def _process_contact_keys(self, contact_keys: dict[str, dict]):
-        """
-        Processa contact_keys recebidas do servidor.
-        Cada entrada: { "type": "ecdh"|"owner", "key": b64, "enc_username": b64 }
-        """
-        for contact_uid, entry in contact_keys.items():
-            if not isinstance(entry, dict):
-                continue
+    # ------------------------------------------------------------------ #
+    # Forward Secrecy — rotação de chave de sessão (1-para-1)           #
+    # ------------------------------------------------------------------ #
+
+    def rotate_key(self, contact: str) -> tuple[bool, str]:
+        uid = self._keystore.resolve_username_to_uid(self._username, contact) or contact
+        pub_b64, err = self._get_certified_pub_key(uid)
+        if not pub_b64:
+            return False, err
+
+        try:
+            enc_blob = self._keystore.rotate_contact_key(self._username, uid, pub_b64)
+        except Exception as e:
+            return False, f"Erro na rotação: {e}"
+
+        ok, msg, _ = self._request({
+            "type":    "ROTATE_KEY",
+            "to":      uid,
+            "enc_key": enc_blob,
+        })
+        return ok, msg
+
+    def _process_key_rotations(self, rotations: dict[str, str]):
+        for sender_uid, enc_blob in rotations.items():
             try:
-                key_type = entry.get("type", "ecdh")
-                blob     = entry.get("key", "")
-
-                if key_type == "ecdh":
-                    self._keystore.receive_contact_key(
-                        self._username, contact_uid, blob
-                    )
-                    # registar username de quem adicionou
-                    enc_username = entry.get("enc_username", "")
-                    if enc_username:
-                        sym_key = self._keystore.get_contact_key(
-                            self._username, contact_uid
-                        )
-                        if sym_key:
-                            username_claro = self._msg_store.decrypt_message(enc_username, sym_key)
-                            if username_claro:
-                                self._keystore.save_contact_username(
-                                    self._username, contact_uid, username_claro
-                                )
-                elif key_type == "owner":
-                    self._keystore.receive_owner_key(
-                        self._username, contact_uid, blob
-                    )
-
+                self._keystore.receive_rotated_key(self._username, sender_uid, enc_blob)
             except Exception as e:
-                print(f"  Aviso: erro ao processar chave de '{contact_uid}': {e}")
+                print(f"  Aviso: erro ao processar rotação de '{sender_uid}': {e}")
 
-    def _request(self, payload: dict) -> tuple[bool, str, dict]:
-        try:
-            self._ch.send(json.dumps(payload).encode("utf-8"))
-            resp = self._ch.recv()
-        except OSError:
-            return False, "Falha de comunicacao com o servidor.", {}
+    # ------------------------------------------------------------------ #
+    # Forward Secrecy — rotação de chave de grupo após remoção           #
+    # ------------------------------------------------------------------ #
 
-        if resp is None:
-            return False, "Servidor desligou.", {}
+    def _rotate_group_key_after_removal(self, group_id: str,
+                                        remaining_members: list[str],
+                                        group_name: str) -> tuple[bool, str]:
+        new_group_key = os.urandom(32)
+        enc_keys: dict[str, str] = {}
 
-        try:
-            message = json.loads(resp.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            return False, "Resposta invalida do servidor.", {}
+        for uid in remaining_members:
+            pub_b64, err = self._get_certified_pub_key(uid)
+            if not pub_b64:
+                return False, f"Não foi possível obter chave de '{uid[:8]}...': {err}"
+            try:
+                enc_keys[uid] = self._keystore.encrypt_group_key_for(new_group_key, pub_b64)
+            except Exception as e:
+                return False, f"Erro ao cifrar chave para '{uid[:8]}...': {e}"
 
-        if not isinstance(message, dict):
-            return False, "Formato invalido de resposta.", {}
+        ok, msg, _ = self._request({
+            "type":     "ROTATE_GROUP_KEY",
+            "group_id": group_id,
+            "enc_keys": enc_keys,
+        })
 
-        ok   = bool(message.get("ok", False))
-        text = str(message.get("message", "Sem mensagem."))
-        data = message.get("data")
-        if not isinstance(data, dict):
-            data = {}
-        return ok, text, data
+        if ok:
+            try:
+                self._keystore.save_group_key(self._username, group_id,
+                                              new_group_key, group_name)
+            except Exception as e:
+                return False, f"Chave rotacionada no servidor mas erro ao guardar localmente: {e}"
+
+        return ok, msg
 
     # ------------------------------------------------------------------ #
     # Grupos                                                             #
@@ -271,13 +267,8 @@ class ClientController:
         return cert.get("pub_key", ""), ""
 
     def create_group(self, name: str, members: list[str]) -> tuple[bool, str]:
-        """
-        name: nome do grupo visível.
-        members: lista de usernames dos membros (sem incluir o próprio).
-        """
         self_uid = self._keystore.username_to_uid(self._username)
 
-        # Resolver UIDs e verificar certificados de todos os membros
         all_uids_and_pubs: dict[str, str] = {}
         for m in members:
             uid = self._keystore.resolve_username_to_uid(self._username, m) or m
@@ -291,12 +282,9 @@ class ClientController:
         if not all_uids_and_pubs:
             return False, "Sem membros válidos para criar o grupo."
 
-        # Incluir o próprio utilizador com a sua pub_key local
-        self_pub_b64 = self._keystore.load_public_key_bytes(self._username)
-        import base64 as _b64
-        all_uids_and_pubs[self_uid] = _b64.b64encode(self_pub_b64).decode()
+        self_pub_bytes = self._keystore.load_public_key_bytes(self._username)
+        all_uids_and_pubs[self_uid] = base64.b64encode(self_pub_bytes).decode()
 
-        # Gerar chave de grupo e cifrar para cada membro via ECDH
         group_key = os.urandom(32)
         enc_keys  = {
             uid: self._keystore.encrypt_group_key_for(group_key, pub)
@@ -309,16 +297,13 @@ class ClientController:
             "members":  list(all_uids_and_pubs.keys()),
             "enc_keys": enc_keys,
         })
-
         if ok:
             group_id = data.get("group_id", "")
             if group_id:
                 self._keystore.save_group_key(self._username, group_id, group_key, name)
-
         return ok, message
 
     def get_groups(self) -> list[dict]:
-        """Devolve grupos do utilizador, sincronizando chaves em falta."""
         ok, _, data = self._request({"type": "GET_GROUPS"})
         if not ok:
             return []
@@ -332,7 +317,8 @@ class ClientController:
                     enc_key = kdata.get("enc_key", "")
                     if enc_key:
                         try:
-                            self._keystore.receive_group_key(self._username, gid, enc_key, name)
+                            self._keystore.receive_group_key(self._username, gid,
+                                                             enc_key, name)
                         except Exception as e:
                             print(f"  Aviso: não foi possível decifrar chave do grupo '{name}': {e}")
         return groups
@@ -366,7 +352,8 @@ class ClientController:
                 plaintext = self._msg_store.decrypt_message(m.get("content", ""), group_key)
                 if plaintext is not None:
                     sender_uid = m.get("from", "?")
-                    sender = self._keystore.resolve_uid(self._username, sender_uid) or sender_uid
+                    sender     = self._keystore.resolve_uid(self._username, sender_uid) \
+                                 or sender_uid
                     self._msg_store.append_ciphered(
                         self._username, f"grp_{group_id}",
                         sender, plaintext, group_key, ts=m.get("ts")
@@ -392,15 +379,87 @@ class ClientController:
 
     def remove_group_member(self, group_id: str, member: str) -> tuple[bool, str]:
         uid = self._keystore.resolve_username_to_uid(self._username, member) or member
+
         ok, message, _ = self._request({
             "type":     "REMOVE_GROUP_MEMBER",
             "group_id": group_id,
             "uid":      uid,
         })
-        return ok, message
+        if not ok:
+            return ok, message
+
+        groups = self.get_groups()
+        group  = next((g for g in groups if g["group_id"] == group_id), None)
+        if not group:
+            return True, f"{message} (aviso: rotação de chave não efectuada)"
+
+        remaining = [m for m in group.get("members", []) if m != uid]
+        group_name = group.get("name", "")
+
+        rot_ok, rot_msg = self._rotate_group_key_after_removal(
+            group_id, remaining, group_name
+        )
+        if not rot_ok:
+            return True, f"{message} (aviso: rotação falhou — {rot_msg})"
+
+        return True, f"{message} · Chave do grupo rotacionada."
+
+    # ------------------------------------------------------------------ #
+    # Processamento de chaves recebidas                                  #
+    # ------------------------------------------------------------------ #
+
+    def _process_contact_keys(self, contact_keys: dict[str, dict]):
+        for contact_uid, entry in contact_keys.items():
+            if not isinstance(entry, dict):
+                continue
+            try:
+                key_type = entry.get("type", "ecdh")
+                blob     = entry.get("key", "")
+                if key_type == "ecdh":
+                    self._keystore.receive_contact_key(self._username, contact_uid, blob)
+                    enc_username = entry.get("enc_username", "")
+                    if enc_username:
+                        sym_key = self._keystore.get_contact_key(self._username, contact_uid)
+                        if sym_key:
+                            username_claro = self._msg_store.decrypt_message(enc_username, sym_key)
+                            if username_claro:
+                                self._keystore.save_contact_username(
+                                    self._username, contact_uid, username_claro)
+                elif key_type == "owner":
+                    self._keystore.receive_owner_key(self._username, contact_uid, blob)
+            except Exception as e:
+                print(f"  Aviso: erro ao processar chave de '{contact_uid}': {e}")
+
+    # ------------------------------------------------------------------ #
+    # Comunicação                                                         #
+    # ------------------------------------------------------------------ #
+
+    def _request(self, payload: dict) -> tuple[bool, str, dict]:
+        try:
+            self._ch.send(json.dumps(payload).encode("utf-8"))
+            resp = self._ch.recv()
+        except OSError:
+            return False, "Falha de comunicacao com o servidor.", {}
+
+        if resp is None:
+            return False, "Servidor desligou.", {}
+
+        try:
+            message = json.loads(resp.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return False, "Resposta invalida do servidor.", {}
+
+        if not isinstance(message, dict):
+            return False, "Formato invalido de resposta.", {}
+
+        ok   = bool(message.get("ok", False))
+        text = str(message.get("message", "Sem mensagem."))
+        data = message.get("data")
+        if not isinstance(data, dict):
+            data = {}
+        return ok, text, data
 
     def disconnect(self):
-        # Limpeza centralizada em KeyStore: apaga ficheiros locais e limpa seed ativo
         self._keystore.clear_active_user()
-        self._username    = None
+        self._username = None
         self._ch.close()
