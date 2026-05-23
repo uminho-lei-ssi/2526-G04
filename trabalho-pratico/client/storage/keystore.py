@@ -38,6 +38,9 @@ class KeyStore:
 
     def _contacts_path(self, username: str) -> str:
         return os.path.join(self.keys_dir, f"{username.replace(os.sep, '_')}_contacts.json")
+
+    def _groups_path(self, username: str) -> str:
+        return os.path.join(self.keys_dir, f"{username.replace(os.sep, '_')}_groups.json")
     
     @staticmethod
     def username_to_uid(username: str) -> str:
@@ -120,17 +123,17 @@ class KeyStore:
     def clear_active_user(self):
         """Apaga chaves locais do utilizador activo (se existirem) e limpa o estado da classe."""
         if self._active_user:
-            try:
-                # remover ficheiros locais de keys/contacts do utilizador activo
-                keyp = self._key_path(self._active_user)
-                contactp = self._contacts_path(self._active_user)
-                if os.path.exists(keyp):
-                    os.remove(keyp)
-                if os.path.exists(contactp):
-                    os.remove(contactp)
-            except OSError as e:
-                # não falhar logout por erro ao apagar ficheiros; apenas loggar
-                print(f"[keystore] Aviso: erro ao apagar ficheiros locais de '{self._active_user}': {e}")
+            paths = [
+                self._key_path(self._active_user),
+                self._contacts_path(self._active_user),
+                self._groups_path(self._active_user),
+            ]
+            for p in paths:
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                except OSError as e:
+                    print(f"[keystore] Aviso: erro ao apagar '{p}': {e}")
 
         self._active_user = None
         self._master_seed = None
@@ -299,3 +302,84 @@ class KeyStore:
         enc_for_contact = base64.b64encode(eph_pub_bytes + nonce + enc_key).decode()
 
         return enc_for_contact, enc_for_self
+
+    # ------------------------------------------------------------------ #
+    # Chaves de grupo                                                      #
+    # ------------------------------------------------------------------ #
+
+    def _load_groups(self, username: str) -> dict:
+        path = self._groups_path(username)
+        if not os.path.exists(path):
+            return {}
+        with open(path) as f:
+            return json.load(f)
+
+    def _save_groups(self, username: str, data: dict):
+        os.makedirs(self.keys_dir, exist_ok=True)
+        with open(self._groups_path(username), "w") as f:
+            json.dump(data, f, indent=2)
+
+    def save_group_key(self, owner: str, group_id: str,
+                       group_key: bytes, name: str = ""):
+        """Cifra group_key com a storage key e guarda localmente."""
+        if self._master_seed is None:
+            raise ValueError("Master seed não definido.")
+        aes_key = self._derive_storage_key_from_seed(self._master_seed)
+        nonce   = os.urandom(12)
+        enc_key = AESGCM(aes_key).encrypt(nonce, group_key, None)
+        data = self._load_groups(owner)
+        data[group_id] = {
+            "nonce":   base64.b64encode(nonce).decode(),
+            "enc_key": base64.b64encode(enc_key).decode(),
+            "name":    name,
+        }
+        self._save_groups(owner, data)
+
+    def get_group_key(self, owner: str, group_id: str) -> bytes | None:
+        """Decifra e devolve a chave simétrica do grupo, ou None."""
+        entry = self._load_groups(owner).get(group_id)
+        if not entry or "nonce" not in entry:
+            return None
+        if self._master_seed is None:
+            raise ValueError("Master seed não definido.")
+        aes_key = self._derive_storage_key_from_seed(self._master_seed)
+        try:
+            return AESGCM(aes_key).decrypt(
+                base64.b64decode(entry["nonce"]),
+                base64.b64decode(entry["enc_key"]),
+                None
+            )
+        except Exception:
+            return None
+
+    def get_group_name(self, owner: str, group_id: str) -> str | None:
+        return self._load_groups(owner).get(group_id, {}).get("name")
+
+    def receive_group_key(self, owner: str, group_id: str,
+                          enc_blob_b64: str, name: str = ""):
+        """Decifra group_key recebida via ECDH efémero e guarda localmente."""
+        if self._master_seed is None:
+            raise ValueError("Master seed não definido.")
+        owner_priv = self._derive_identity_from_seed(self._master_seed)
+        raw     = base64.b64decode(enc_blob_b64)
+        eph_pub = X25519PublicKey.from_public_bytes(raw[:32])
+        nonce   = raw[32:44]
+        enc_key = raw[44:]
+        shared  = owner_priv.exchange(eph_pub)
+        aes_key = HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
+                       info=b"group-key-exchange").derive(shared)
+        group_key = AESGCM(aes_key).decrypt(nonce, enc_key, None)
+        self.save_group_key(owner, group_id, group_key, name)
+
+    def encrypt_group_key_for(self, group_key: bytes,
+                               member_pub_b64: str) -> str:
+        """Cifra group_key para um membro via ECDH efémero."""
+        member_pub = X25519PublicKey.from_public_bytes(base64.b64decode(member_pub_b64))
+        eph_priv   = X25519PrivateKey.generate()
+        shared     = eph_priv.exchange(member_pub)
+        aes_key    = HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
+                          info=b"group-key-exchange").derive(shared)
+        nonce   = os.urandom(12)
+        enc_key = AESGCM(aes_key).encrypt(nonce, group_key, None)
+        eph_pub_bytes = eph_priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        return base64.b64encode(eph_pub_bytes + nonce + enc_key).decode()

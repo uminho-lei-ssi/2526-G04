@@ -37,15 +37,22 @@ class ClientSession(threading.Thread):
             return
 
         handlers = {
-            "REGISTER":       self._handle_register,
-            "LOGIN":          self._handle_login,
-            "LOGOUT":         self._handle_logout,
-            "GET_CONTACTS":   self._handle_get_contacts,
-            "GET_PUB_KEY":    self._handle_get_pub_key,
-            "ADD_CONTACT":    self._handle_add_contact,
-            "REMOVE_CONTACT": self._handle_remove_contact,
-            "SEND_MESSAGE":   self._handle_send_message,
-            "FETCH_MESSAGES": self._handle_fetch_messages,
+            "REGISTER":            self._handle_register,
+            "LOGIN":               self._handle_login,
+            "LOGOUT":              self._handle_logout,
+            "GET_CONTACTS":        self._handle_get_contacts,
+            "GET_PUB_KEY":         self._handle_get_pub_key,
+            "ADD_CONTACT":         self._handle_add_contact,
+            "REMOVE_CONTACT":      self._handle_remove_contact,
+            "SEND_MESSAGE":        self._handle_send_message,
+            "FETCH_MESSAGES":      self._handle_fetch_messages,
+            "CREATE_GROUP":        self._handle_create_group,
+            "GET_GROUPS":          self._handle_get_groups,
+            "GET_GROUP_KEY":       self._handle_get_group_key,
+            "SEND_GROUP_MESSAGE":  self._handle_send_group_message,
+            "FETCH_GROUP_MESSAGES": self._handle_fetch_group_messages,
+            "ADD_GROUP_MEMBER":    self._handle_add_group_member,
+            "REMOVE_GROUP_MEMBER": self._handle_remove_group_member,
         }
 
         cmd = str(message.get("type", "")).strip().upper()
@@ -191,6 +198,87 @@ class ClientSession(threading.Thread):
             "messages":     messages,
             "contact_keys": contact_keys,
         })
+
+    # ------------------------------------------------------------------ #
+    # Grupos                                                             #
+    # ------------------------------------------------------------------ #
+
+    def _handle_create_group(self, payload: dict):
+        if not self._ensure_authenticated():
+            return
+        name     = str(payload.get("name", "")).strip()
+        members  = payload.get("members", [])
+        enc_keys = payload.get("enc_keys", {})
+
+        if not name:
+            return self._send_response(False, "ERRO nome do grupo obrigatorio.")
+        if not isinstance(members, list) or not members:
+            return self._send_response(False, "ERRO lista de membros invalida.")
+        if not isinstance(enc_keys, dict):
+            return self._send_response(False, "ERRO chaves de grupo invalidas.")
+
+        gid = self.state.create_group(name, self.username, members, enc_keys)
+        if not gid:
+            return self._send_response(False, "ERRO membro inexistente ou dados invalidos.")
+        self._send_response(True, "OK grupo criado.", {"group_id": gid})
+
+    def _handle_get_groups(self, message=None):
+        if not self._ensure_authenticated():
+            return
+        uid    = self.username
+        groups = self.state.get_groups_for_user(uid)
+        self._send_response(True, "OK grupos obtidos.", {"groups": groups})
+
+    def _handle_get_group_key(self, payload: dict):
+        if not self._ensure_authenticated():
+            return
+        gid = str(payload.get("group_id", "")).strip()
+        if not gid:
+            return self._send_response(False, "ERRO group_id obrigatorio.")
+        enc_key = self.state.get_group_enc_key(gid, self.username)
+        if enc_key is None:
+            return self._send_response(False, "ERRO sem acesso a este grupo.")
+        self._send_response(True, "OK chave de grupo obtida.", {"enc_key": enc_key})
+
+    def _handle_send_group_message(self, payload: dict):
+        if not self._ensure_authenticated():
+            return
+        gid     = str(payload.get("group_id", "")).strip()
+        content = str(payload.get("content", ""))
+        if not gid or not content.strip():
+            return self._send_response(False, "ERRO group_id e content obrigatorios.")
+        ok, msg = self.state.queue_group_message(gid, self.username, content)
+        self._send_response(ok, msg)
+
+    def _handle_fetch_group_messages(self, payload: dict):
+        if not self._ensure_authenticated():
+            return
+        gid = str(payload.get("group_id", "")).strip()
+        if not gid:
+            return self._send_response(False, "ERRO group_id obrigatorio.")
+        msgs = self.state.pop_group_messages(self.username, gid)
+        self._send_response(True, "OK mensagens de grupo obtidas.", {"messages": msgs})
+
+    def _handle_add_group_member(self, payload: dict):
+        if not self._ensure_authenticated():
+            return
+        gid        = str(payload.get("group_id", "")).strip()
+        new_member = str(payload.get("uid", "")).strip()
+        enc_key    = str(payload.get("enc_key", "")).strip()
+        if not gid or not new_member or not enc_key:
+            return self._send_response(False, "ERRO dados incompletos.")
+        ok, msg = self.state.add_group_member(gid, self.username, new_member, enc_key)
+        self._send_response(ok, msg)
+
+    def _handle_remove_group_member(self, payload: dict):
+        if not self._ensure_authenticated():
+            return
+        gid    = str(payload.get("group_id", "")).strip()
+        target = str(payload.get("uid", "")).strip()
+        if not gid or not target:
+            return self._send_response(False, "ERRO dados incompletos.")
+        ok, msg = self.state.remove_group_member(gid, self.username, target)
+        self._send_response(ok, msg)
 
     def _ensure_authenticated(self) -> bool:
         if self.username:

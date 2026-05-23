@@ -3,6 +3,7 @@ import json
 import os
 import threading
 import time
+import uuid
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives import hashes
@@ -16,10 +17,12 @@ _STATE_PATH      = "server/data/server_state.json"
 class ServerState:
     def __init__(self):
 
-        self._users:        dict[str, dict]            = {}
-        self._online:       dict[str, object]          = {}
-        self._offline:      dict[str, list[dict]]      = {}
-        self._contact_keys: dict[str, dict[str, str]]  = {}
+        self._users:          dict[str, dict]                    = {}
+        self._online:         dict[str, object]                 = {}
+        self._offline:        dict[str, list[dict]]             = {}
+        self._contact_keys:   dict[str, dict[str, str]]         = {}
+        self._groups:         dict[str, dict]                   = {}
+        self._group_messages: dict[str, dict[str, list[dict]]]  = {}
 
         self._lock = threading.Lock()
         self._load_from_disk()
@@ -209,6 +212,110 @@ class ServerState:
             return selected
 
     # ------------------------------------------------------------------ #
+    # Grupos                                                             #
+    # ------------------------------------------------------------------ #
+
+    def create_group(self, name: str, admin: str,
+                     members: list[str], enc_keys: dict[str, str]) -> str | None:
+        """Cria grupo. Devolve group_id ou None se algum membro não existir."""
+        with self._lock:
+            for m in members:
+                if m not in self._users:
+                    return None
+            gid = uuid.uuid4().hex
+            self._groups[gid] = {
+                "name":     name,
+                "admin":    admin,
+                "members":  set(members),
+                "enc_keys": enc_keys,
+            }
+            for m in members:
+                self._group_messages.setdefault(m, {})[gid] = []
+            self._persist_locked()
+            return gid
+
+    def get_groups_for_user(self, uid: str) -> list[dict]:
+        with self._lock:
+            return [
+                {
+                    "group_id": gid,
+                    "name":     g["name"],
+                    "admin":    g["admin"],
+                    "members":  list(g["members"]),
+                }
+                for gid, g in self._groups.items()
+                if uid in g["members"]
+            ]
+
+    def get_group_enc_key(self, group_id: str, uid: str) -> str | None:
+        with self._lock:
+            g = self._groups.get(group_id)
+            if not g or uid not in g["members"]:
+                return None
+            return g["enc_keys"].get(uid)
+
+    def queue_group_message(self, group_id: str, sender: str,
+                            content: str) -> tuple[bool, str]:
+        with self._lock:
+            g = self._groups.get(group_id)
+            if not g:
+                return False, "ERRO grupo nao existe."
+            if sender not in g["members"]:
+                return False, "ERRO nao e membro do grupo."
+            msg = {"from": sender, "content": content, "ts": int(time.time())}
+            for m in g["members"]:
+                if m != sender:
+                    self._group_messages.setdefault(m, {}).setdefault(group_id, []).append(msg)
+            self._persist_locked()
+            return True, "OK mensagem de grupo enfileirada."
+
+    def pop_group_messages(self, uid: str, group_id: str) -> list[dict]:
+        with self._lock:
+            user_queues = self._group_messages.get(uid, {})
+            msgs = list(user_queues.get(group_id, []))
+            if group_id in user_queues:
+                user_queues[group_id] = []
+                self._persist_locked()
+            return msgs
+
+    def add_group_member(self, group_id: str, requester: str,
+                         new_member: str, enc_key: str) -> tuple[bool, str]:
+        with self._lock:
+            g = self._groups.get(group_id)
+            if not g:
+                return False, "ERRO grupo nao existe."
+            if g["admin"] != requester:
+                return False, "ERRO apenas o administrador pode adicionar membros."
+            if new_member not in self._users:
+                return False, "ERRO utilizador nao existe."
+            if new_member in g["members"]:
+                return False, "ERRO utilizador ja e membro."
+            g["members"].add(new_member)
+            g["enc_keys"][new_member] = enc_key
+            self._group_messages.setdefault(new_member, {})[group_id] = []
+            self._persist_locked()
+            return True, "OK membro adicionado."
+
+    def remove_group_member(self, group_id: str, requester: str,
+                            target: str) -> tuple[bool, str]:
+        with self._lock:
+            g = self._groups.get(group_id)
+            if not g:
+                return False, "ERRO grupo nao existe."
+            if g["admin"] != requester:
+                return False, "ERRO apenas o administrador pode remover membros."
+            if target not in g["members"]:
+                return False, "ERRO utilizador nao e membro."
+            if target == g["admin"]:
+                return False, "ERRO administrador nao pode ser removido."
+            g["members"].remove(target)
+            g["enc_keys"].pop(target, None)
+            if target in self._group_messages:
+                self._group_messages[target].pop(group_id, None)
+            self._persist_locked()
+            return True, "OK membro removido."
+
+    # ------------------------------------------------------------------ #
     # Persistência                                                       #
     # ------------------------------------------------------------------ #
 
@@ -222,10 +329,17 @@ class ServerState:
             for uname, u in self._users.items()
         }
 
+        groups_serial = {
+            gid: {**g, "members": list(g.get("members", []))}
+            for gid, g in self._groups.items()
+        }
+
         state_data = {
-            "users":        users_serial,
-            "offline":      self._offline,
-            "contact_keys": self._contact_keys,
+            "users":          users_serial,
+            "offline":        self._offline,
+            "contact_keys":   self._contact_keys,
+            "groups":         groups_serial,
+            "group_messages": self._group_messages,
         }
         try:
             with open(_STATE_PATH, "w", encoding="utf-8") as f:
@@ -249,6 +363,11 @@ class ServerState:
             }
             self._offline      = state_data.get("offline", {})
             self._contact_keys = state_data.get("contact_keys", {})
+            self._groups = {
+                gid: {**g, "members": set(g.get("members", []))}
+                for gid, g in state_data.get("groups", {}).items()
+            }
+            self._group_messages = state_data.get("group_messages", {})
         except (OSError, json.JSONDecodeError) as e:
             print(f"[-] Erro ao carregar estado: {e}. A iniciar base de dados limpa.")
             self._users, self._offline, self._contact_keys = {}, {}, {}
