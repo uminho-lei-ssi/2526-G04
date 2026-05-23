@@ -9,7 +9,6 @@ class ClientController:
     def __init__(self, ch: SecureChannel, keystore: KeyStore, message_store: MessageStore):
         self._ch          = ch
         self._username:  str | None = None
-        self._master_seed            = None
         self._keystore   = keystore
         self._msg_store  = message_store
 
@@ -47,7 +46,9 @@ class ClientController:
 
         try:
             self._keystore.save_from_server(username, data.get("pub_key", ""), data.get("blob", ""))
-            self._master_seed = self._keystore.load_master_seed(username, password)
+            seed = self._keystore.load_master_seed(username, password)
+            # regista seed no keystore para uso por outros métodos
+            self._keystore.set_active_user(username, seed)
         except ValueError as e:
             return False, f"Erro ao carregar chaves: {e}"
 
@@ -62,10 +63,9 @@ class ClientController:
     def logout(self) -> tuple[bool, str]:
         ok, message, _ = self._request({"type": "LOGOUT"})
         if ok:
-            if self._username:
-                self._keystore.delete_local_keys(self._username)
+            # limpar seed activo e ficheiros locais via KeyStore
+            self._keystore.clear_active_user()
             self._username    = None
-            self._master_seed = None
         return ok, message
 
     def get_contacts(self) -> list[str]:
@@ -99,13 +99,13 @@ class ClientController:
 
         try:
             enc_for_contact, enc_for_self = self._keystore.generate_contact_key(
-                self._username, uid, contact_pub_b64, self._master_seed
+                self._username, uid, contact_pub_b64
             )
         except Exception as e:
             return False, f"Erro ao gerar chave de contacto: {e}"
 
         # Cifrar o nosso username para o contacto o conhecer
-        sym_key      = self._keystore.get_contact_key(self._username, uid, self._master_seed)
+        sym_key      = self._keystore.get_contact_key(self._username, uid)
         enc_username = self._msg_store.encrypt_message(self._username, sym_key)
 
         ok, message, _ = self._request({
@@ -129,7 +129,7 @@ class ClientController:
 
     def send_message(self, recipient: str, content: str) -> tuple[bool, str]:
         uid     = self._keystore.resolve_username_to_uid(self._username, recipient) or recipient
-        sym_key = self._keystore.get_contact_key(self._username, uid, self._master_seed)
+        sym_key = self._keystore.get_contact_key(self._username, uid)
         if not sym_key:
             return False, f"Sem chave de sessão para '{recipient}'."
 
@@ -154,7 +154,7 @@ class ClientController:
         if ok:
             self._process_contact_keys(data.get("contact_keys", {}))
 
-            sym_key = self._keystore.get_contact_key(self._username, uid, self._master_seed)
+            sym_key = self._keystore.get_contact_key(self._username, uid)
             if sym_key:
                 for m in data.get("messages", []):
                     if not isinstance(m, dict):
@@ -169,7 +169,7 @@ class ClientController:
                             sym_key, ts=m.get("ts")
                         )
 
-        sym_key = self._keystore.get_contact_key(self._username, uid, self._master_seed)
+        sym_key = self._keystore.get_contact_key(self._username, uid)
         if not sym_key:
             return []
         return self._msg_store.load_all(self._username, contact, sym_key)
@@ -188,13 +188,13 @@ class ClientController:
 
                 if key_type == "ecdh":
                     self._keystore.receive_contact_key(
-                        self._username, contact_uid, blob, self._master_seed
+                        self._username, contact_uid, blob
                     )
                     # registar username de quem adicionou
                     enc_username = entry.get("enc_username", "")
                     if enc_username:
                         sym_key = self._keystore.get_contact_key(
-                            self._username, contact_uid, self._master_seed
+                            self._username, contact_uid
                         )
                         if sym_key:
                             username_claro = self._msg_store.decrypt_message(enc_username, sym_key)
@@ -204,7 +204,7 @@ class ClientController:
                                 )
                 elif key_type == "owner":
                     self._keystore.receive_owner_key(
-                        self._username, contact_uid, blob, self._master_seed
+                        self._username, contact_uid, blob
                     )
 
             except Exception as e:
@@ -236,8 +236,7 @@ class ClientController:
         return ok, text, data
 
     def disconnect(self):
-        if self._username:
-            self._keystore.delete_local_keys(self._username)
+        # Limpeza centralizada em KeyStore: apaga ficheiros locais e limpa seed ativo
+        self._keystore.clear_active_user()
         self._username    = None
-        self._master_seed = None
         self._ch.close()

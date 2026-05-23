@@ -29,6 +29,9 @@ from cryptography.hazmat.primitives import hashes
 class KeyStore:
     def __init__(self, keys_dir: str):
         self.keys_dir = os.path.abspath(keys_dir)
+        # master seed activo para o utilizador actualmente logado
+        self._active_user: str | None = None
+        self._master_seed: bytes | None = None
 
     def _key_path(self, username: str) -> str:
         return os.path.join(self.keys_dir, f"{username.replace(os.sep, '_')}.json")
@@ -109,6 +112,29 @@ class KeyStore:
                 "enc_seed": base64.b64encode(enc_seed).decode(),
             }, f, indent=2)
 
+    def set_active_user(self, username: str, master_seed: bytes):
+        """Regista o username activo e o master seed em memória."""
+        self._active_user = username
+        self._master_seed = master_seed
+
+    def clear_active_user(self):
+        """Apaga chaves locais do utilizador activo (se existirem) e limpa o estado da classe."""
+        if self._active_user:
+            try:
+                # remover ficheiros locais de keys/contacts do utilizador activo
+                keyp = self._key_path(self._active_user)
+                contactp = self._contacts_path(self._active_user)
+                if os.path.exists(keyp):
+                    os.remove(keyp)
+                if os.path.exists(contactp):
+                    os.remove(contactp)
+            except OSError as e:
+                # não falhar logout por erro ao apagar ficheiros; apenas loggar
+                print(f"[keystore] Aviso: erro ao apagar ficheiros locais de '{self._active_user}': {e}")
+
+        self._active_user = None
+        self._master_seed = None
+
     def load_master_seed(self, username: str, password: str) -> bytes:
         """Decifra e devolve a Master Seed. Lança ValueError se a password for errada."""
         path = self._key_path(username)
@@ -174,9 +200,12 @@ class KeyStore:
     # ------------------------------------------------------------------ #
 
     def receive_contact_key(self, owner: str, sender_uid: str,
-                            enc_blob_b64: str, master_seed: bytes):
+                            enc_blob_b64: str):
         """Decifra chave simétrica enviada via ECDH e guarda localmente."""
-        owner_priv = self._derive_identity_from_seed(master_seed)
+        if self._master_seed is None:
+            raise ValueError("Master seed não definido para decifrar chave de contacto.")
+
+        owner_priv = self._derive_identity_from_seed(self._master_seed)
 
         raw     = base64.b64decode(enc_blob_b64)
         eph_pub = X25519PublicKey.from_public_bytes(raw[:32])
@@ -188,21 +217,30 @@ class KeyStore:
                        info=b"contact-key-exchange").derive(shared)
 
         sym_key = AESGCM(aes_key).decrypt(nonce, enc_key, None)
-        self.save_contact_key(owner, sender_uid, sym_key, master_seed)
+        self.save_contact_key(owner, sender_uid, sym_key)
 
     def receive_owner_key(self, owner: str, contact: str,
-                          blob: str, master_seed: bytes):
+                          blob: str):
         """Decifra chave simétrica cifrada com a storage key e guarda localmente."""
-        aes_key_storage = self._derive_storage_key_from_seed(master_seed)
+        if self._master_seed is None:
+            raise ValueError("Master seed não definido para decifrar chave de owner.")
+
+        aes_key_storage = self._derive_storage_key_from_seed(self._master_seed)
         raw = base64.b64decode(blob)
         nonce, enc_key = raw[:12], raw[12:]
         sym_key = AESGCM(aes_key_storage).decrypt(nonce, enc_key, None)
-        self.save_contact_key(owner, contact, sym_key, master_seed)
+        self.save_contact_key(owner, contact, sym_key)
 
     def save_contact_key(self, owner: str, contact: str,
-                         sym_key: bytes, master_seed: bytes) -> str:
-        """Cifra sym_key com a storage key e guarda. Devolve base64(nonce+enc_key)."""
-        aes_key_storage = self._derive_storage_key_from_seed(master_seed)
+                         sym_key: bytes) -> str:
+        """Cifra sym_key com a storage key e guarda. Devolve base64(nonce+enc_key).
+
+        Se `master_seed` não for especificado, usa o master seed activo definido em `set_active_user()`.
+        """
+        if self._master_seed is None:
+            raise ValueError("Master seed não definido para guardar chave de contacto.")
+
+        aes_key_storage = self._derive_storage_key_from_seed(self._master_seed)
         nonce   = os.urandom(12)
         enc_key = AESGCM(aes_key_storage).encrypt(nonce, sym_key, None)
 
@@ -215,14 +253,19 @@ class KeyStore:
 
         return base64.b64encode(nonce + enc_key).decode()
 
-    def get_contact_key(self, owner: str, contact: str,
-                        master_seed: bytes) -> bytes | None:
-        """Decifra e devolve a chave simétrica do contacto."""
+    def get_contact_key(self, owner: str, contact: str) -> bytes | None:
+        """Decifra e devolve a chave simétrica do contacto.
+
+        Se `master_seed` não for especificado, usa o master seed activo definido em `set_active_user()`.
+        """
         entry = self._load_contacts(owner).get(contact)
         if not entry or "nonce" not in entry:
             return None
 
-        aes_key_storage = self._derive_storage_key_from_seed(master_seed)
+        if self._master_seed is None:
+            raise ValueError("Master seed não definido para decifrar chave de contacto.")
+
+        aes_key_storage = self._derive_storage_key_from_seed(self._master_seed)
         try:
             return AESGCM(aes_key_storage).decrypt(
                 base64.b64decode(entry["nonce"]),
@@ -233,8 +276,7 @@ class KeyStore:
             return None
 
     def generate_contact_key(self, owner: str, contact: str,
-                              contact_pub_b64: str,
-                              master_seed: bytes) -> tuple[str, str]:
+                              contact_pub_b64: str) -> tuple[str, str]:
         """
         Gera chave AES-256 para comunicação com contact.
         Devolve (enc_for_contact, enc_for_self).
@@ -242,7 +284,7 @@ class KeyStore:
         enc_for_self    = base64(nonce[12] + enc_key)                 — storage key
         """
         sym_key      = os.urandom(32)
-        enc_for_self = self.save_contact_key(owner, contact, sym_key, master_seed)
+        enc_for_self = self.save_contact_key(owner, contact, self._master_seed)
 
         contact_pub = X25519PublicKey.from_public_bytes(base64.b64decode(contact_pub_b64))
         eph_priv    = X25519PrivateKey.generate()
