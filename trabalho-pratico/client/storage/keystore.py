@@ -15,7 +15,6 @@ Ficheiro de contactos:   <keys_dir>/<username>_contacts.json
 """
 
 import base64
-import hashlib
 import json
 import os
 
@@ -40,7 +39,9 @@ class KeyStore:
     @staticmethod
     def username_to_uid(username: str) -> str:
         """SHA-256(username) em hex — identificador público opaco."""
-        return hashlib.sha256(username.encode()).hexdigest()
+        digest = hashes.Hash(hashes.SHA256())
+        digest.update(username.encode())
+        return digest.finalize().hex()
 
     @staticmethod
     def _derive_key_from_password(password: str, salt: bytes) -> bytes:
