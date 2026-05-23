@@ -4,11 +4,14 @@ import threading
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from common.secureChannel import SecureChannel
 from server.state import ServerState
+from server import ca
 
 class ClientSession(threading.Thread):
-    def __init__(self, ch: SecureChannel, addr, state: ServerState):
+    def __init__(self, ch: SecureChannel, addr, state: ServerState,
+                 signing_key: Ed25519PrivateKey):
         super().__init__(daemon=True)
         self.ch, self.addr, self.state = ch, addr, state
+        self.signing_key = signing_key
         self.username = None
 
     def run(self):
@@ -57,7 +60,7 @@ class ClientSession(threading.Thread):
             self._send_response(False, f"ERRO comando desconhecido: {cmd}")
 
     def _handle_register(self, payload: dict):
-        user     = str(payload.get("username", "")).strip()  # Aqui chega o hash do cliente
+        user     = str(payload.get("username", "")).strip()  # hash do cliente
         pwd      = str(payload.get("password", ""))
         pub_key  = str(payload.get("pub_key",  "")).strip()
         blob     = str(payload.get("blob", "")).strip()
@@ -66,8 +69,10 @@ class ClientSession(threading.Thread):
             return self._send_response(False, "ERRO username/password obrigatorios.")
         if not pub_key or not blob:
             return self._send_response(False, "ERRO chaves criptograficas obrigatorias.")
-        
-        if not self.state.register_user(user, pwd, pub_key, blob):
+
+        cert_json, sig_b64 = ca.issue_certificate(user, pub_key, self.signing_key)
+
+        if not self.state.register_user(user, pwd, pub_key, blob, cert_json, sig_b64):
             return self._send_response(False, f"ERRO utilizador já existe.")
 
         print(f"  Registado: {user[:8]}...")
@@ -116,7 +121,15 @@ class ClientSession(threading.Thread):
         pub_key = self.state.get_pub_key(target)
         if not pub_key:
             return self._send_response(False, f"ERRO utilizador nao existe.")
-        self._send_response(True, "OK chave publica obtida.", {"pub_key": pub_key})
+        cert_pair = self.state.get_cert(target)
+        if not cert_pair:
+            return self._send_response(False, "ERRO certificado nao disponivel.")
+        cert_json, sig_b64 = cert_pair
+        self._send_response(True, "OK chave publica obtida.", {
+            "pub_key": pub_key,
+            "cert":    cert_json,
+            "sig":     sig_b64,
+        })
 
     def _handle_add_contact(self, payload: dict):
         if not self._ensure_authenticated():
@@ -222,6 +235,6 @@ class ChatServer:
                     print(f"    Handshake falhou com {addr}: {e}")
                     conn.close()
                     continue
-                ClientSession(ch, addr, self.state).start()
+                ClientSession(ch, addr, self.state, self.signing_key).start()
         except KeyboardInterrupt:
             self.sock.close()
