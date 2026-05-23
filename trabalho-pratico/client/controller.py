@@ -35,7 +35,11 @@ class ClientController:
         if not ok:
             self._keystore.delete_local_keys(username)
 
-        return ok, message
+        login_ok, login_msg = self.login(username, password)
+        if login_ok:
+            return True, "Registo e login automático efetuados com sucesso!"
+        else:
+            return False, f"Registo com sucesso, mas falha no auto-login: {login_msg}"
 
     def login(self, username: str, password: str) -> tuple[bool, str]:
         hash_username = self._keystore.username_to_uid(username)
@@ -67,7 +71,8 @@ class ClientController:
     def logout(self) -> tuple[bool, str]:
         ok, message, _ = self._request({"type": "LOGOUT"})
         if ok:
-            # limpar seed activo e ficheiros locais via KeyStore
+            # limpar seed ativa e ficheiros locais via KeyStore
+            self._keystore.delete_local_keys(self._username)
             self._keystore.clear_active_user()
             self._username    = None
         return ok, message
@@ -401,6 +406,7 @@ class ClientController:
 
     def disconnect(self):
         # Limpeza centralizada em KeyStore: apaga ficheiros locais e limpa seed ativo
+        self._keystore.delete_local_keys(self._username)
         self._keystore.clear_active_user()
         self._username    = None
         self._ch.close()

@@ -1,4 +1,5 @@
 import getpass
+import re
 from datetime import datetime
 from client.controller import ClientController
 
@@ -31,6 +32,52 @@ def prompt_input(label: str, hidden: bool = False) -> str:
     if hidden:
         return getpass.getpass(f"  {label}: ")
     return input(f"  {label}: ").strip()
+
+
+# ---------------------------------------------------------------------------
+# Sanitização de Input
+# ---------------------------------------------------------------------------
+
+def validar_e_sanitizar_username(username: str) -> tuple[bool, str]:
+    """
+    Valida o username contra ataques de Path Traversal e incompatibilidades de ficheiros.
+    Retorna (True, "") se for válido, ou (False, "Mensagem de Erro") se falhar.
+    """
+    if not (3 <= len(username) <= 32):
+        return False, "O utilizador deve ter entre 3 e 32 caracteres."
+
+    if not re.match(r"^[a-zA-Z0-9_.-]+$", username):
+        return False, "O utilizador apenas pode conter letras, números, '.', '-' e '_'."
+    
+    if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$", username):
+        return False, "O utilizador deve começar por uma letra ou número."
+
+    # nomes reservados em OS's Windows
+    nomes_reservados = {"con", "prn", "aux", "nul"}
+    username_lower = username.lower()
+    if username_lower in nomes_reservados or re.match(r"^(com|lpt)\d$", username_lower):
+        return False, "Nome de utilizador reservado por sistema operativo."
+
+    return True, ""
+
+def validar_requisitos_password(password: str) -> tuple[bool, str]:
+    """
+    Garante que a password tem entropia mínima para proteger o KeyStore local.
+    Requisitos: Mínimo 8 caracteres, 1 Maiúscula, 1 Minúscula e 1 Número.
+    """
+    if len(password) < 8:
+        return False, "A password deve ter pelo menos 8 caracteres."
+    
+    if not any(c.isupper() for c in password):
+        return False, "A password deve conter pelo menos uma letra maiúscula."
+        
+    if not any(c.islower() for c in password):
+        return False, "A password deve conter pelo menos uma letra minúscula."
+        
+    if not any(c.isdigit() for c in password):
+        return False, "A password deve conter pelo menos um número."
+        
+    return True, ""
 
 
 # ---------------------------------------------------------------------------
@@ -75,10 +122,16 @@ def menu_login(controller: ClientController):
     return auth
 
 
-
 def _fazer_login(controller: ClientController) -> bool:
     header("Login")
     username = prompt_input("Utilizador")
+    
+    valido, erro = validar_e_sanitizar_username(username)
+    if not valido:
+        print(f"\n  Erro: {erro}")
+        input("\n  Enter para continuar...")
+        return False
+
     password = prompt_input("Password", hidden=True)
 
     ok, msg = controller.login(username, password)
@@ -90,8 +143,21 @@ def _fazer_login(controller: ClientController) -> bool:
 def _fazer_registo(controller: ClientController) -> bool:
     header("Registar")
     username = prompt_input("Utilizador")
+    
+    valido, erro = validar_e_sanitizar_username(username)
+    if not valido:
+        print(f"\n  Erro: {erro}")
+        input("\n  Enter para continuar...")
+        return False
+
     password = prompt_input("Password", hidden=True)
     password2 = prompt_input("Confirmar password", hidden=True)
+
+    valido, erro = validar_requisitos_password(password)
+    if not valido:
+        print(f"\n  Erro: {erro}")
+        input("\n  Enter para continuar...")
+        return False
 
     if password != password2:
         print("\n  As passwords não coincidem.")
@@ -101,7 +167,7 @@ def _fazer_registo(controller: ClientController) -> bool:
     ok, msg = controller.register(username, password)
     print(f"\n  {msg}")
     input("\n  Enter para continuar...")
-    return False
+    return ok
 
 
 def menu_principal(controller: ClientController) -> bool:
@@ -109,7 +175,7 @@ def menu_principal(controller: ClientController) -> bool:
     while True:
         clear()
         header("Menu Principal")
-        choice = prompt_choice(["Contactos", "Grupos", "Logout", "Sair (Manter Sessão)"])
+        choice = prompt_choice(["Contactos", "Grupos", "Logout"])
 
         if choice == 0:
             menu_contactos(controller)
@@ -120,8 +186,6 @@ def menu_principal(controller: ClientController) -> bool:
             print(f"\n  {msg}")
             input("  Enter para continuar...")
             return True
-        elif choice == 3:
-            return False
 
 
 def menu_contactos(controller: ClientController):
@@ -160,6 +224,12 @@ def _adicionar_contacto(controller: ClientController):
     contact = prompt_input("Nome do contacto")
     if not contact:
         print("\n  Nome de contacto invalido.")
+        input("\n  Enter para continuar...")
+        return
+
+    valido, erro = validar_e_sanitizar_username(contact)
+    if not valido:
+        print(f"\n  Erro no nome do contacto: {erro}")
         input("\n  Enter para continuar...")
         return
 
@@ -253,6 +323,13 @@ def _criar_grupo(controller: ClientController):
         m = prompt_input(f"  Membro {len(members) + 1} (ou enter para terminar)")
         if not m:
             break
+        
+        # Validar username do membro antes de aceitar
+        valido, erro = validar_e_sanitizar_username(m)
+        if not valido:
+            print(f"  Erro: {erro}")
+            continue
+
         if m == controller._username:
             print("  (já és membro automaticamente)")
             continue
@@ -340,6 +417,13 @@ def _gerir_membro_grupo(controller: ClientController, group_id: str,
         username = prompt_input("Username do novo membro")
         if not username:
             return
+        
+        valido, erro = validar_e_sanitizar_username(username)
+        if not valido:
+            print(f"\n  Erro: {erro}")
+            input("\n  Enter para continuar...")
+            return
+
         ok, msg = controller.add_group_member(group_id, username)
     else:
         header("Remover Membro")
@@ -389,4 +473,3 @@ def _abrir_conversa(controller: ClientController, contact: str):
             if not ok:
                 print(f"\n  {msg}")
                 input("\n  Enter para continuar...")
- 

@@ -121,20 +121,7 @@ class KeyStore:
         self._master_seed = master_seed
 
     def clear_active_user(self):
-        """Apaga chaves locais do utilizador activo (se existirem) e limpa o estado da classe."""
-        if self._active_user:
-            paths = [
-                self._key_path(self._active_user),
-                self._contacts_path(self._active_user),
-                self._groups_path(self._active_user),
-            ]
-            for p in paths:
-                try:
-                    if os.path.exists(p):
-                        os.remove(p)
-                except OSError as e:
-                    print(f"[keystore] Aviso: erro ao apagar '{p}': {e}")
-
+        """Limpa o estado da classe."""
         self._active_user = None
         self._master_seed = None
 
