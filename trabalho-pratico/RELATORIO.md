@@ -1,15 +1,15 @@
-# Relatório — Projecto de Segurança de Sistemas Informáticos
+# Relatório — Projeto de Segurança de Sistemas Informáticos
 **Grupo 04 · 2025/2026**
 
 ---
 
 ## 1. Descrição Geral
 
-O projecto consiste numa aplicação de chat segura cliente-servidor implementada em Python com a biblioteca `cryptography`. O sistema garante *End-to-End Encryption* (E2EE) nas mensagens trocadas entre utilizadores, assegurando que o servidor — mesmo que comprometido — não consegue aceder ao conteúdo das comunicações nem identificar os participantes por nome. Para além da funcionalidade base, foram implementadas as valorizações de mensagens offline, PKI/CA, mensagens de grupo e rotação de chaves para *forward secrecy* parcial.
+O projeto consiste numa aplicação de chat segura cliente-servidor implementada em Python com a biblioteca `cryptography`. O sistema garante *End-to-End Encryption* (E2EE) nas mensagens trocadas entre utilizadores, assegurando que o servidor — mesmo que comprometido — não consegue aceder ao conteúdo das comunicações nem identificar os participantes por nome. Para além da funcionalidade base, foram implementadas as valorizações de mensagens offline, PKI/CA e mensagens de grupo.
 
 ---
 
-## 2. Arquitectura do Sistema
+## 2. Arquitetura do Sistema
 
 ### 2.1 Visão Geral
 
@@ -20,7 +20,7 @@ O sistema segue um modelo cliente-servidor clássico com separação lógica est
 │  client/                                            │
 │  ├── main.py          Ponto de entrada + TOFU       │
 │  ├── controller.py    Lógica de negócio + E2EE      │
-│  ├── interface.py     UI interactiva em terminal    │
+│  ├── interface.py     UI interativa em terminal     │
 │  └── storage/                                       │
 │      ├── keystore.py  Master Seed, chaves locais    │
 │      └── messageStore.py  Histórico cifrado         │
@@ -40,11 +40,11 @@ O sistema segue um modelo cliente-servidor clássico com separação lógica est
 
 ### 2.2 Servidor
 
-O servidor corre em modo contínuo, aguardando ligações TCP. Cada ligação é tratada numa thread independente (`ClientSession`), que despacha comandos JSON recebidos através do canal seguro. O estado global (utilizadores, mensagens offline, contactos, grupos) é mantido em memória e persistido num ficheiro JSON (`server/data/server_state.json`). O servidor actua também como Autoridade de Certificação (CA), mantendo um par de chaves Ed25519 de longa duração (`server/data/server_signing.pem`).
+O servidor corre em modo contínuo, aguardando ligações TCP. Cada ligação é tratada numa thread independente (`ClientSession`), que despacha comandos JSON recebidos através do canal seguro. O estado global (utilizadores, mensagens offline, contactos, grupos) é mantido em memória e persistido num ficheiro JSON (`server/data/server_state.json`). O servidor atua também como Autoridade de Certificação (CA), mantendo um par de chaves Ed25519 de longa duração (`server/data/server_signing.pem`).
 
 ### 2.3 Cliente
 
-Cada instância do cliente corresponde a um utilizador. Após estabelecer o canal seguro com o servidor (handshake), o utilizador interage com uma interface de texto interactiva. Toda a lógica criptográfica reside no `controller.py` e no `keystore.py`; a interface (`interface.py`) é agnóstica relativamente à segurança.
+Cada instância do cliente corresponde a um utilizador. Após estabelecer o canal seguro com o servidor (handshake), o utilizador interage com uma interface de texto interativa. Toda a lógica criptográfica reside no `controller.py` e no `keystore.py`; a interface (`interface.py`) é agnóstica relativamente à segurança.
 
 ### 2.4 Protocolo de Transporte
 
@@ -56,7 +56,7 @@ A comunicação TCP usa *length-prefixed framing*: cada mensagem é precedida de
 
 ### 3.1 Handshake e Estabelecimento do Canal Seguro
 
-O handshake é executado em cada nova ligação TCP e autentica o servidor perante o cliente:
+O handshake é executado em cada nova ligação TCP e autentica o servidor perante o cliente através de chaves estáticas:
 
 ```
 Cliente                                    Servidor
@@ -75,9 +75,9 @@ Cliente                                    Servidor
   session_key = HKDF-SHA256(shared, info="chat-session-key")
 ```
 
-O cliente verifica a assinatura Ed25519 do servidor sobre a sua chave efémera X25519. Na primeira ligação, a `signing_pub` é aceite e guardada (*Trust On First Use*); nas ligações seguintes, é comparada com a versão guardada — qualquer divergência é tratada como possível ataque MITM e a ligação é terminada.
+O cliente verifica a assinatura Ed25519 do servidor sobre a sua chave X25519. Na primeira ligação, a `signing_pub` é aceite e guardada (*Trust On First Use*); nas ligações seguintes, é comparada com a versão guardada — qualquer divergência é tratada como possível ataque MITM e a ligação é terminada.
 
-A chave de sessão `session_key` é derivada via HKDF-SHA256 sobre o segredo partilhado X25519 e usada para cifrar todas as mensagens subsequentes com AES-256-GCM (nonce aleatório de 12 bytes por mensagem).
+A chave de sessão `session_key` é derivada via HKDF-SHA256 sobre o segredo partilhado X25519 estático e usada para cifrar todas as mensagens subsequentes com AES-256-GCM (nonce aleatório de 12 bytes por mensagem).
 
 ### 3.2 Registo
 
@@ -90,10 +90,10 @@ Cliente                                    Servidor
   │  blob = salt‖nonce‖enc_seed               │
   │  uid = SHA-256(username)                  │
   │                                            │
-  │──── REGISTER {uid, pwd, pub_key, blob} ──▶│
-  │                                            │  cert = {uid, pub_key}
+  │──── REGISTER {uid, hash_pwd, pub_key, blob} ──▶│
+  │                                            │  cert = {uid, pub_key, issued_at}
   │                                            │  sig  = Ed25519Sign(signing_key, cert)
-  │                                            │  guarda {hash(pwd), pub_key, blob, cert, sig}
+  │                                            │  guarda {hash(hash_pwd), pub_key, blob, cert, sig}
   │◀─── RESPONSE {ok: true} ──────────────────│
 ```
 
@@ -103,8 +103,8 @@ O servidor nunca vê o username em claro — recebe apenas o seu SHA-256. O blob
 
 ```
 Cliente                                    Servidor
-  │──── LOGIN {uid, pwd} ────────────────────▶│
-  │                                            │  verifica PBKDF2(pwd) == hash_guardado
+  │──── LOGIN {uid, hash_pwd} ────────────────────▶│
+  │                                            │  verifica PBKDF2(hash_pwd) == hash_guardado
   │◀─── RESPONSE {ok, pub_key, blob} ─────────│
   │                                            │
   │  decifra blob com PBKDF2(pwd) → seed      │
@@ -222,9 +222,9 @@ Alice                                      Servidor
   │  save_group_key(group_id, group_key)     │
 ```
 
-Quando Bob faz login e chama `GET_GROUPS`, o servidor indica que pertence a um grupo. O cliente busca `GET_GROUP_KEY` e decifra a sua cópia da `group_key` via ECDH. Todas as mensagens de grupo são cifradas/decifradas com `group_key` usando AES-256-GCM. O servidor entrega as mensagens apenas aos membros actuais do grupo.
+Quando Bob faz login e chama `GET_GROUPS`, o servidor indica que pertence a um grupo. O cliente busca `GET_GROUP_KEY` e decifra a sua cópia da `group_key` via ECDH. Todas as mensagens de grupo são cifradas/decifradas com `group_key` usando AES-256-GCM. O servidor entrega as mensagens apenas aos membros atuais do grupo.
 
-O administrador pode adicionar membros (cifrando a `group_key` actual para o novo membro via ECDH) ou remover membros. Após remover um membro, o cliente administrador gera uma nova chave de grupo, cifra-a para todos os membros restantes e envia-a ao servidor através de `ROTATE_GROUP_KEY`. Desta forma, o membro removido deixa de receber mensagens novas e também deixa de possuir a chave necessária para as decifrar caso as obtenha por outro meio.
+O administrador pode adicionar membros (cifrando a `group_key` atual para o novo membro via ECDH) ou remover membros (o servidor deixa de entregar mensagens ao removido e faz uma rotação da chave para todos os restantes membros).
 
 ---
 
@@ -265,6 +265,7 @@ A chave de contacto pode ser rotacionada durante a utilização da conversa. Nes
 ### 4.3 Chaves de Grupo
 
 Cada grupo possui uma chave simétrica AES-256 (`group_key`), gerada pelo criador. É distribuída a cada membro via ECDH efémero com `info="group-key-exchange"` (para separação de domínio relativamente às chaves de contacto). Localmente, é guardada cifrada em `<username>_groups.json` com a `storage_key`.
+A remoção de membros do grupo despoleta a rotação da chave pelo administrador e subsequente reencaminhamento para os restantes membros.
 
 Quando um membro é removido, o administrador gera uma nova `group_key` e cifra-a de novo para todos os membros que permanecem no grupo. O servidor apenas substitui o mapa `enc_keys` associado ao grupo; nunca vê a nova chave em claro.
 
@@ -293,9 +294,9 @@ O username nunca circula em claro entre o cliente e o servidor. O identificador 
 
 O sistema foi desenhado considerando dois adversários distintos:
 
-**Servidor honesto mas curioso:** Executa o protocolo correctamente (não apaga nem altera mensagens indevidamente) mas tenta aprender o máximo possível sobre os utilizadores e as suas comunicações. Não deve conseguir ler o conteúdo das mensagens nem os nomes dos participantes nas conversas.
+**Servidor honesto mas curioso:** Executa o protocolo corretamente (não apaga nem altera mensagens indevidamente) mas tenta aprender o máximo possível sobre os utilizadores e as suas comunicações. Não deve conseguir ler o conteúdo das mensagens nem os nomes dos participantes nas conversas.
 
-**Atacante activo na rede (MITM):** Pode interceptar, modificar ou injectar pacotes TCP. Deve ser impedido de: (1) ler ou alterar mensagens, (2) fazer-se passar pelo servidor, (3) substituir chaves públicas de utilizadores.
+**Atacante aivo na rede (MITM):** Pode intercetar, modificar ou injetar pacotes TCP. Deve ser impedido de: (1) ler ou alterar mensagens, (2) fazer-se passar pelo servidor, (3) substituir chaves públicas de utilizadores.
 
 ### 5.2 Primitivas Criptográficas e Justificação
 
@@ -312,7 +313,7 @@ O sistema foi desenhado considerando dois adversários distintos:
 
 **Confidencialidade das mensagens:** As mensagens são cifradas com AES-256-GCM com a chave simétrica E2EE, que o servidor nunca possui. O servidor armazena e encaminha apenas ciphertext opaco.
 
-**Integridade e autenticidade das mensagens:** AES-256-GCM inclui um tag de autenticação de 128 bits. Qualquer modificação do ciphertext em trânsito ou no servidor é detectada aquando da decifra pelo destinatário.
+**Integridade e autenticidade das mensagens:** AES-256-GCM inclui um tag de autenticação de 128 bits. Qualquer modificação do ciphertext em trânsito ou no servidor é detetada aquando da decifra pelo destinatário.
 
 **Autenticidade do servidor:** O handshake inclui uma assinatura Ed25519 do servidor sobre a sua chave efémera X25519. O cliente verifica esta assinatura com a `signing_pub` fixada via TOFU, impedindo que um MITM substitua o servidor.
 
@@ -324,21 +325,21 @@ O sistema foi desenhado considerando dois adversários distintos:
 
 **Protecção em trânsito:** Todos os dados após o handshake são cifrados com AES-256-GCM com nonce aleatório gerado por mensagem. A camada de transporte impõe um limite de 64 KB por mensagem para mitigar alocação excessiva de memória.
 
-**Controlo de acesso em grupos:** O servidor apenas entrega mensagens de grupo a membros actuais. A adição/remoção de membros é restrita ao administrador do grupo. Novos membros recebem a chave de grupo cifrada via ECDH, sem que o servidor tenha acesso à chave em claro.
+**Controlo de acesso em grupos:** O servidor apenas entrega mensagens de grupo a membros atuais. A adição/remoção de membros é restrita ao administrador do grupo. Novos membros recebem a chave de grupo cifrada via ECDH, sem que o servidor tenha acesso à chave em claro.
 
 **Forward secrecy parcial:** O canal cliente-servidor usa ECDH efémero por ligação. Nas conversas 1-para-1, a chave E2EE pode ser rotacionada quando a conversa é aberta, sendo a nova chave enviada cifrada para o contacto. Nos grupos, a chave é rotacionada após remoção de membros, impedindo que membros removidos continuem a decifrar mensagens futuras apenas por terem guardado a chave antiga.
 
 ### 5.4 Limitações Conhecidas
 
-**Forward secrecy incompleta face a Double Ratchet:** A rotação implementada é por evento/conversa, não por mensagem. Se uma chave de contacto for comprometida antes de uma nova rotação ser recebida pelo destinatário, as mensagens cifradas com essa chave continuam expostas. Uma protecção mais forte exigiria um protocolo de ratchet por mensagem, com encadeamento de chaves e recuperação após compromisso.
-
-**Mensagens antigas após rotação:** O cliente mantém localmente a chave de contacto actual. Depois de uma rotação, mensagens antigas que ainda não tenham sido decifradas podem deixar de ser legíveis se dependerem da chave anterior. Um sistema completo teria de guardar versões de chaves por época ou associar cada mensagem a um identificador de chave.
-
 **Estado do servidor não cifrado:** O ficheiro `server_state.json` contém em plaintext o grafo de contactos entre utilizadores (UIDs), as listas de membros de grupos e os metadados de certificados. Um atacante com acesso ao disco do servidor pode inferir relações sociais, ainda que não consiga ler o conteúdo das mensagens. Cifrar o estado do servidor comprometeria a capacidade do servidor de processar pedidos, pelo que uma solução real exigiria uma base de dados com cifra ao nível das colunas ou um modelo de servidor oblivious.
 
-**Sessão única por utilizador:** O servidor recusa uma segunda ligação para o mesmo UID enquanto a primeira está activa. Múltiplos dispositivos simultâneos não são suportados.
+**Sessão única por utilizador:** O servidor recusa uma segunda ligação para o mesmo UID enquanto a primeira está ativa. Múltiplos dispositivos simultâneos não são suportados.
 
-**Sem verificação de revogação de certificados:** Não existe mecanismo de CRL (Certificate Revocation List) ou OCSP. Se a chave privada X25519 de um utilizador for comprometida, o servidor não tem forma de invalidar o certificado existente sem intervenção manual.
+**Sem revogação de certificados:** Não existe mecanismo de CRL (Certificate Revocation List) ou OCSP. Se a chave privada X25519 de um utilizador for comprometida, o servidor não tem forma de invalidar o certificado existente sem intervenção manual.
+
+**Fetch de Mensagens Não Otimizado**: A operação FETCH_MESSAGES carece de otimização, pois descarrega sempre a totalidade do buffer disponível sem filtrar apenas o que ainda não foi lido pelo cliente. Para solucionar esta limitação, seria necessária a introdução de um sistema de IDs únicos por mensagem (Message IDs) e o controlo do estado de leitura.
+
+**Ataque de Dicionário a Usernames**: A operação ADD_CONTACT permite a um atacante procurar usernames no estado do servidor sem restrições. A solução seria a geração no registo de um UUID independente pedido para adição de contactos.
 
 **Ausência de limite de tentativas de login:** O servidor não implementa rate limiting nas tentativas de autenticação, o que torna o sistema vulnerável a ataques de força bruta sobre passwords.
 
@@ -374,15 +375,7 @@ Esta solução não equivale a um Double Ratchet completo, mas limita a exposiç
 
 ---
 
-## 7. Funcionalidades Não Implementadas
-
-**Forward Secrecy completa (Double Ratchet):** Uma implementação completa exigiria a adopção de um protocolo de ratchet (semelhante ao Signal Protocol), com geração de novas chaves por mensagem, chaves por época e possibilidade de healing após comprometimento de uma chave. A solução actual implementa rotação explícita de chaves, mas não um ratchet contínuo por mensagem.
-
-**Modo Descentralizado (PGP-like / P2P):** A arquitectura actual é intrinsecamente centralizada — o servidor é o único ponto de encontro entre clientes. Um modo P2P exigiria mecanismos de descoberta de endereços (ex.: NAT traversal, servidor de sinalização separado) e um protocolo de handshake directo entre clientes, representando uma mudança arquitectural significativa.
-
----
-
-## 8. Dependências
+## 7. Dependências
 
 - **Python 3.10+**
 - **`cryptography`** (versão ≥ 41) — X25519, Ed25519, AES-256-GCM, PBKDF2-HMAC-SHA256, HKDF-SHA256

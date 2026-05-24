@@ -49,6 +49,13 @@ class KeyStore:
         digest = hashes.Hash(hashes.SHA256())
         digest.update(username.encode())
         return digest.finalize().hex()
+    
+    @staticmethod
+    def hash_password(password: str) -> str:
+        """Faz hash SHA256 da password para transmissão ao servidor (hex encoded)."""
+        digest = hashes.Hash(hashes.SHA256())
+        digest.update(password.encode())
+        return digest.finalize().hex()
 
     @staticmethod
     def _derive_key_from_password(password: str, salt: bytes) -> bytes:
@@ -116,18 +123,7 @@ class KeyStore:
         self._master_seed = master_seed
 
     def clear_active_user(self):
-        if self._active_user:
-            paths = [
-                self._key_path(self._active_user),
-                self._contacts_path(self._active_user),
-                self._groups_path(self._active_user),
-            ]
-            for p in paths:
-                try:
-                    if os.path.exists(p):
-                        os.remove(p)
-                except OSError as e:
-                    print(f"[keystore] Aviso: erro ao apagar '{p}': {e}")
+        """Limpa o estado da classe."""
         self._active_user = None
         self._master_seed = None
 

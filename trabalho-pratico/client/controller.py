@@ -26,25 +26,33 @@ class ClientController:
             pub_b64, blob = self._keystore.generate_and_save(username, password)
         except Exception as e:
             return False, f"Erro ao gerar chaves: {e}"
-
+        
         hash_username = self._keystore.username_to_uid(username)
+        password_hash = self._keystore.hash_password(password)
+
         ok, message, _ = self._request({
             "type":     "REGISTER",
             "username": hash_username,
-            "password": password,
+            "password": password_hash,
             "pub_key":  pub_b64,
             "blob":     blob,
         })
         if not ok:
             self._keystore.delete_local_keys(username)
-        return ok, message
+
+        login_ok, login_msg = self.login(username, password)
+        if login_ok:
+            return True, "Registo e login automático efetuados com sucesso!"
+        else:
+            return False, f"Registo com sucesso, mas falha no auto-login: {login_msg}"
 
     def login(self, username: str, password: str) -> tuple[bool, str]:
         hash_username = self._keystore.username_to_uid(username)
+        password_hash = self._keystore.hash_password(password)
         ok, message, data = self._request({
             "type":     "LOGIN",
             "username": hash_username,
-            "password": password,
+            "password": password_hash,
         })
         if not ok:
             return ok, message
@@ -68,6 +76,8 @@ class ClientController:
     def logout(self) -> tuple[bool, str]:
         ok, message, _ = self._request({"type": "LOGOUT"})
         if ok:
+            # limpar seed ativa e ficheiros locais via KeyStore
+            self._keystore.delete_local_keys(self._username)
             self._keystore.clear_active_user()
             self._username = None
         return ok, message
@@ -164,18 +174,18 @@ class ClientController:
             sym_key = self._keystore.get_contact_key(self._username, uid)
             if sym_key:
                 for m in data.get("messages", []):
-                    if not isinstance(m, dict):
-                        continue
-                    plaintext = self._msg_store.decrypt_message(m.get("content", ""), sym_key)
-                    if plaintext is not None:
-                        sender_uid = m.get("from", uid)
-                        sender     = self._keystore.resolve_uid(self._username, sender_uid) \
-                                     or sender_uid
-                        self._msg_store.append_ciphered(
-                            self._username, contact,
-                            sender, plaintext,
-                            sym_key, ts=m.get("ts")
-                        )
+                        if not isinstance(m, dict):
+                            continue
+                        dec = self._msg_store.decrypt_message(m.get("content", ""), sym_key)
+                        if dec is not None:
+                            plaintext, msg_ts = dec
+                            sender_uid = m.get("from", uid)
+                            sender     = self._keystore.resolve_uid(self._username, sender_uid) or sender_uid
+                            self._msg_store.append_ciphered(
+                                self._username, contact,
+                                sender, plaintext,
+                                sym_key, ts=msg_ts
+                            )
 
         sym_key = self._keystore.get_contact_key(self._username, uid)
         if not sym_key:
@@ -207,7 +217,32 @@ class ClientController:
     def _process_key_rotations(self, rotations: dict[str, str]):
         for sender_uid, enc_blob in rotations.items():
             try:
-                self._keystore.receive_rotated_key(self._username, sender_uid, enc_blob)
+                key_type = entry.get("type", "ecdh")
+                blob     = entry.get("key", "")
+
+                if key_type == "ecdh":
+                    self._keystore.receive_contact_key(
+                        self._username, contact_uid, blob
+                    )
+                    # registar username de quem adicionou
+                    enc_username = entry.get("enc_username", "")
+                    if enc_username:
+                        sym_key = self._keystore.get_contact_key(
+                            self._username, contact_uid
+                        )
+                        if sym_key:
+                                decu = self._msg_store.decrypt_message(enc_username, sym_key)
+                                if decu is not None:
+                                    username_claro = decu[0]
+                                    if username_claro:
+                                        self._keystore.save_contact_username(
+                                            self._username, contact_uid, username_claro
+                                        )
+                elif key_type == "owner":
+                    self._keystore.receive_owner_key(
+                        self._username, contact_uid, blob
+                    )
+
             except Exception as e:
                 print(f"  Aviso: erro ao processar rotação de '{sender_uid}': {e}")
 
@@ -349,14 +384,15 @@ class ClientController:
             for m in data.get("messages", []):
                 if not isinstance(m, dict):
                     continue
-                plaintext = self._msg_store.decrypt_message(m.get("content", ""), group_key)
-                if plaintext is not None:
+                dec = self._msg_store.decrypt_message(m.get("content", ""), group_key)
+                if dec is not None:
+                    plaintext, msg_ts = dec
                     sender_uid = m.get("from", "?")
                     sender     = self._keystore.resolve_uid(self._username, sender_uid) \
                                  or sender_uid
                     self._msg_store.append_ciphered(
                         self._username, f"grp_{group_id}",
-                        sender, plaintext, group_key, ts=m.get("ts")
+                        sender, plaintext, group_key, ts=msg_ts
                     )
         return self._msg_store.load_all(self._username, f"grp_{group_id}", group_key)
 
@@ -460,6 +496,8 @@ class ClientController:
         return ok, text, data
 
     def disconnect(self):
+        # Limpeza centralizada em KeyStore: apaga ficheiros locais e limpa seed ativo
+        self._keystore.delete_local_keys(self._username)
         self._keystore.clear_active_user()
         self._username = None
         self._ch.close()
