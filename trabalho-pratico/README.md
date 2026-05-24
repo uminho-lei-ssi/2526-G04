@@ -94,7 +94,7 @@ O cliente verifica a assinatura e valida `signing_pub` via **TOFU** (guardada em
 O servidor age como CA self-signed. No **registo**, emite um certificado digital:
 
 ```json
-{ "uid": "<sha256-hex do username>", "pub_key": "<base64 X25519>", "issued_at": <unix_ts> }
+{ "uid": "<sha256-hex do username>", "pub_key": "<base64 X25519>"}
 ```
 
 Assinado com Ed25519 (`signing_key` do servidor). Quando um cliente adiciona um contacto, recebe a `pub_key` acompanhada de `(cert_json, sig_b64)` e **verifica a assinatura** com a `signing_pub` já fixada via TOFU antes de usar a chave. Isto garante autenticidade mesmo que o servidor seja comprometido em trânsito.

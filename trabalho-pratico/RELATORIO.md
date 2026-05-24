@@ -90,10 +90,10 @@ Cliente                                    Servidor
   │  blob = salt‖nonce‖enc_seed               │
   │  uid = SHA-256(username)                  │
   │                                            │
-  │──── REGISTER {uid, pwd, pub_key, blob} ──▶│
+  │──── REGISTER {uid, hash_pwd, pub_key, blob} ──▶│
   │                                            │  cert = {uid, pub_key, issued_at}
   │                                            │  sig  = Ed25519Sign(signing_key, cert)
-  │                                            │  guarda {hash(pwd), pub_key, blob, cert, sig}
+  │                                            │  guarda {hash(hash_pwd), pub_key, blob, cert, sig}
   │◀─── RESPONSE {ok: true} ──────────────────│
 ```
 
@@ -103,8 +103,8 @@ O servidor nunca vê o username em claro — recebe apenas o seu SHA-256. O blob
 
 ```
 Cliente                                    Servidor
-  │──── LOGIN {uid, pwd} ────────────────────▶│
-  │                                            │  verifica PBKDF2(pwd) == hash_guardado
+  │──── LOGIN {uid, hash_pwd} ────────────────────▶│
+  │                                            │  verifica PBKDF2(hash_pwd) == hash_guardado
   │◀─── RESPONSE {ok, pub_key, blob} ─────────│
   │                                            │
   │  decifra blob com PBKDF2(pwd) → seed      │
@@ -175,7 +175,7 @@ O servidor armazena exclusivamente o ciphertext. Mesmo com acesso ao estado do s
 No registo, o servidor emite um certificado digital associando o UID à chave pública X25519 do utilizador:
 
 ```json
-{ "issued_at": 1748000000, "pub_key": "<base64 X25519>", "uid": "<sha256 hex>" }
+{ "pub_key": "<base64 X25519>", "uid": "<sha256 hex>" }
 ```
 
 O certificado é serializado em JSON canónico (chaves ordenadas, sem espaços) e assinado com a chave Ed25519 de longa duração do servidor. Esta assinatura é verificada pelo cliente sempre que obtém a chave pública de um contacto (fluxo `GET_PUB_KEY`), usando a `signing_pub` fixada via TOFU. Desta forma, mesmo que o servidor seja comprometido em memória, não pode substituir a chave pública de um utilizador sem invalidar a assinatura — a chave privada Ed25519 seria necessária para forjar um certificado válido.
@@ -202,7 +202,7 @@ Alice                                      Servidor
 
 Quando Bob faz login e chama `GET_GROUPS`, o servidor indica que pertence a um grupo. O cliente busca `GET_GROUP_KEY` e decifra a sua cópia da `group_key` via ECDH. Todas as mensagens de grupo são cifradas/decifradas com `group_key` usando AES-256-GCM. O servidor entrega as mensagens apenas aos membros atuais do grupo.
 
-O administrador pode adicionar membros (cifrando a `group_key` atual para o novo membro via ECDH) ou remover membros (o servidor deixa de entregar mensagens ao removido).
+O administrador pode adicionar membros (cifrando a `group_key` atual para o novo membro via ECDH) ou remover membros (o servidor deixa de entregar mensagens ao removido e faz uma rotação da chave para todos os restantes membros).
 
 ---
 
@@ -241,6 +241,7 @@ Localmente, as chaves de contacto são guardadas cifradas em `<username>_contact
 ### 4.3 Chaves de Grupo
 
 Cada grupo possui uma chave simétrica AES-256 (`group_key`), gerada pelo criador. É distribuída a cada membro via ECDH efémero com `info="group-key-exchange"` (para separação de domínio relativamente às chaves de contacto). Localmente, é guardada cifrada em `<username>_groups.json` com a `storage_key`.
+A remoção de membros do grupo despoleta a rotação da chave pelo administrador e subsequente reencaminhamento para os restantes membros.
 
 ### 4.4 Separação de Domínio (Domain Separation)
 

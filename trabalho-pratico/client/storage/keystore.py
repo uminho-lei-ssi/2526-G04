@@ -48,6 +48,13 @@ class KeyStore:
         digest = hashes.Hash(hashes.SHA256())
         digest.update(username.encode())
         return digest.finalize().hex()
+    
+    @staticmethod
+    def hash_password(password: str) -> str:
+        """Faz hash SHA256 da password para transmissão ao servidor (hex encoded)."""
+        digest = hashes.Hash(hashes.SHA256())
+        digest.update(password.encode())
+        return digest.finalize().hex()
 
     @staticmethod
     def _derive_key_from_password(password: str, salt: bytes) -> bytes:

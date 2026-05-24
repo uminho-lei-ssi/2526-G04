@@ -23,11 +23,12 @@ class ClientController:
             return False, f"Erro ao gerar chaves: {e}"
         
         hash_username = self._keystore.username_to_uid(username)
+        password_hash = self._keystore.hash_password(password)
 
         ok, message, _ = self._request({
             "type":     "REGISTER",
             "username": hash_username,
-            "password": password,
+            "password": password_hash,
             "pub_key":  pub_b64,
             "blob":     blob,
         })
@@ -43,10 +44,11 @@ class ClientController:
 
     def login(self, username: str, password: str) -> tuple[bool, str]:
         hash_username = self._keystore.username_to_uid(username)
+        password_hash = self._keystore.hash_password(password)
         ok, message, data = self._request({
             "type":     "LOGIN",
             "username": hash_username,
-            "password": password,
+            "password": password_hash,
         })
 
         if not ok:
