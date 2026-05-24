@@ -467,9 +467,12 @@ def _abrir_conversa(controller: ClientController, contact: str):
             else:
                 print("  (sem mensagens)")
  
+            print("  [r] Atualizar | enter vazio para regressar")
             text = input("\n  Mensagem: ").strip()
             if not text:
                 return
+            if text.lower() == "r":
+                continue
  
             ok, msg = controller.send_message(contact, text)
             if not ok:
