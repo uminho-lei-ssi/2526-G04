@@ -37,6 +37,9 @@ class KeyStore:
     def _contacts_path(self, username: str) -> str:
         return os.path.join(self.keys_dir, f"{username.replace(os.sep, '_')}_contacts.json")
 
+    def _uid_map_path(self, username: str) -> str:
+        return os.path.join(self.keys_dir, f"{username.replace(os.sep, '_')}_uid_map.json")
+
     def _groups_path(self, username: str) -> str:
         return os.path.join(self.keys_dir, f"{username.replace(os.sep, '_')}_groups.json")
 
@@ -166,6 +169,18 @@ class KeyStore:
         with open(self._contacts_path(owner), "w") as f:
             json.dump(data, f, indent=2)
 
+    def _load_uid_map(self, owner: str) -> dict:
+        path = self._uid_map_path(owner)
+        if not os.path.exists(path):
+            return {}
+        with open(path) as f:
+            return json.load(f)
+
+    def _save_uid_map(self, owner: str, data: dict):
+        os.makedirs(self.keys_dir, exist_ok=True)
+        with open(self._uid_map_path(owner), "w") as f:
+            json.dump(data, f, indent=2)
+
     def save_contact_username(self, owner: str, contact: str, username: str):
         data = self._load_contacts(owner)
         if contact not in data:
@@ -173,13 +188,24 @@ class KeyStore:
         data[contact]["username"] = username
         self._save_contacts(owner, data)
 
+        uid_map = self._load_uid_map(owner)
+        uid_map[contact] = username
+        self._save_uid_map(owner, uid_map)
+
     def resolve_uid(self, owner: str, uid: str) -> str | None:
-        return self._load_contacts(owner).get(uid, {}).get("username")
+        result = self._load_contacts(owner).get(uid, {}).get("username")
+        if result:
+            return result
+        return self._load_uid_map(owner).get(uid)
 
     def resolve_username_to_uid(self, owner: str, username: str) -> str | None:
         data = self._load_contacts(owner)
         for uid, entry in data.items():
             if isinstance(entry, dict) and entry.get("username") == username:
+                return uid
+        uid_map = self._load_uid_map(owner)
+        for uid, uname in uid_map.items():
+            if uname == username:
                 return uid
         return self.username_to_uid(username)
 

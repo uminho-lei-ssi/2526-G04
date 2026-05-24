@@ -25,9 +25,9 @@ Implementada em Python com a biblioteca `cryptography`.
 |-------------|--------|
 | Mensagens Offline | ✅ Feito |
 | PKI / Entidade de Certificação (CA self-signed) | ✅ Feito |
-| Forward Secrecy | ❌ Por fazer |
+| Forward Secrecy (rotação de chaves 1-para-1 e em grupos) | ✅ Feito |
+| Mensagens de Grupo (E2EE, controlo de acesso, rotação de chave) | ✅ Feito |
 | Modo Descentralizado (PGP-like / P2P) | ❌ Por fazer |
-| Mensagens de Grupo | ❌ Por fazer |
 
 ### TODOs pendentes (segurança / funcionalidade)
 
@@ -115,12 +115,20 @@ Quando Alice adiciona Bob:
 
 Todas as mensagens e metadados trocados são cifrados com `sym_key` (AES-256-GCM).
 
+### Forward Secrecy (1-para-1 e Grupos)
+
+Ao abrir uma conversa, o cliente gera uma nova `sym_key` e envia-a cifrada para o contacto via ECDH efémero (`ROTATE_KEY`). Nos grupos, após remoção de um membro, o administrador gera uma nova `group_key` e cifra-a para todos os restantes membros (`ROTATE_GROUP_KEY`). Em ambos os casos, o servidor armazena apenas o pacote cifrado até o destinatário sincronizar.
+
+### Mensagens de Grupo
+
+A chave de grupo (`group_key`, AES-256) é gerada pelo criador e distribuída a cada membro via ECDH efémero com `info="group-key-exchange"`. O servidor aplica controlo de acesso (só membros enviam; só o administrador gere membros). Todas as mensagens de grupo são E2EE — o servidor nunca vê o plaintext.
+
 ### Passwords e Chaves Locais
 
 - Passwords: **PBKDF2-HMAC-SHA256**, 150 000 iterações, salt de 16 bytes (armazenadas no servidor).
 - Master Seed (32 bytes aleatórios): cifrada com **AES-256-GCM** cuja chave é derivada da password via PBKDF2. Blob `salt ‖ nonce ‖ enc_seed` sincronizado com o servidor.
 - Chave de identidade X25519: derivada da Master Seed via `HKDF(seed, info="identity-key")`.
-- *Storage key* (para chaves de contactos em repouso): `HKDF(seed, info="contact-key-storage")`.
+- *Storage key* (para chaves de contactos e grupos em repouso): `HKDF(seed, info="contact-key-storage")`.
 
 ---
 
@@ -177,7 +185,16 @@ Todos os comandos são JSON sobre o canal cifrado. O servidor responde sempre co
 | `ADD_CONTACT` | `contact` (uid), `enc_key_for_owner`, `enc_key_for_contact`, `enc_username` | |
 | `REMOVE_CONTACT` | `contact` (uid) | |
 | `SEND_MESSAGE` | `to` (uid), `content` (E2EE blob) | |
-| `FETCH_MESSAGES` | `contact` (uid, opcional) | Devolve mensagens + `contact_keys` pendentes |
+| `FETCH_MESSAGES` | `contact` (uid, opcional) | Devolve mensagens + `contact_keys` + `key_rotations` pendentes |
+| `ROTATE_KEY` | `to` (uid), `enc_key` (blob ECDH efémero) | Forward secrecy 1-para-1 |
+| `CREATE_GROUP` | `name`, `members` (lista de UIDs), `enc_keys` (mapa uid→blob) | Devolve `group_id` |
+| `GET_GROUPS` | — | Devolve grupos onde o utilizador é membro |
+| `GET_GROUP_KEY` | `group_id` | Devolve `enc_key` cifrada para o utilizador |
+| `SEND_GROUP_MESSAGE` | `group_id`, `content` (E2EE blob) | |
+| `FETCH_GROUP_MESSAGES` | `group_id` | Devolve mensagens de grupo pendentes |
+| `ADD_GROUP_MEMBER` | `group_id`, `uid`, `enc_key` | Só o administrador |
+| `REMOVE_GROUP_MEMBER` | `group_id`, `uid` | Só o administrador |
+| `ROTATE_GROUP_KEY` | `group_id`, `enc_keys` (mapa uid→blob) | Só o administrador; obrigatório após remoção de membro |
 
 ---
 

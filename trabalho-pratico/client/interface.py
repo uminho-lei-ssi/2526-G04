@@ -309,7 +309,7 @@ def _abrir_grupo(controller: ClientController, group: dict):
         else:
             print("  (sem mensagens)")
 
-        options = ["Enviar mensagem"]
+        options = ["Enviar mensagem", "Atualizar mensagens"]
         if is_admin:
             options += ["Adicionar membro", "Remover membro"]
         options.append("<- Voltar")
@@ -324,6 +324,8 @@ def _abrir_grupo(controller: ClientController, group: dict):
                 if not ok:
                     print(f"\n  {msg}")
                     input("\n  Enter para continuar...")
+        elif options[choice] == "Atualizar mensagens":
+            continue
         elif options[choice] == "Adicionar membro":
             _gerir_membro_grupo(controller, group_id, add=True)
         elif options[choice] == "Remover membro":
@@ -387,9 +389,12 @@ def _abrir_conversa(controller: ClientController, contact: str):
         else:
             print("  (sem mensagens)")
 
+        print("  [r] Atualizar | enter vazio para regressar")
         text = input("\n  Mensagem: ").strip()
         if not text:
             return
+        if text.lower() == "r":
+            continue
 
         ok, msg = controller.send_message(contact, text)
         if not ok:
