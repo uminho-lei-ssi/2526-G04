@@ -45,13 +45,17 @@ class MessageStore:
 
     def append_ciphered(self, username: str, contact: str,
                sender: str, plaintext: str, sym_key: bytes, ts: int | None = None):
-        """Cifra `plaintext` com `sym_key` e acrescenta ao histórico local."""
+        """Cifra `plaintext` com `sym_key` (inclui timestamp no payload) e acrescenta ao histórico local.
+
+        O conteúdo cifrado passa a ser JSON: {"text": ..., "ts": ...} cifrado com a mesma chave.
+        """
+        timestamp = ts or int(time.time())
+        payload = json.dumps({"text": plaintext, "ts": timestamp}).encode()
         nonce = os.urandom(12)
-        ct    = AESGCM(sym_key).encrypt(nonce, plaintext.encode(), None)
+        ct    = AESGCM(sym_key).encrypt(nonce, payload, None)
         entry = {
             "from":    sender,
             "content": base64.b64encode(nonce + ct).decode(),
-            "ts":      ts or int(time.time()),
         }
         messages = self._load(username, contact)
         messages.append(entry)
@@ -65,11 +69,15 @@ class MessageStore:
             try:
                 blob  = base64.b64decode(entry["content"])
                 nonce, ct = blob[:12], blob[12:]
-                text  = AESGCM(sym_key).decrypt(nonce, ct, None).decode()
+                plain = AESGCM(sym_key).decrypt(nonce, ct, None).decode()
+                # payload is JSON with fields {"text": ..., "ts": ...}
+                obj = json.loads(plain)
+                text = obj.get("text", "")
+                ts = int(obj.get("ts", 0))
                 result.append({
                     "from":    entry["from"],
                     "content": text,
-                    "ts":      entry.get("ts", 0),
+                    "ts":      ts,
                 })
             except Exception:
                 continue
@@ -81,17 +89,27 @@ class MessageStore:
  
     @staticmethod
     def encrypt_message(plaintext: str, sym_key: bytes) -> str:
-        """Cifra plaintext com AES-256-GCM. Devolve base64(nonce + ciphertext)."""
+        """Cifra plaintext com AES-256-GCM e inclui timestamp no payload.
+
+        Devolve base64(nonce + ciphertext) onde ciphertext é a cifra de
+        JSON {"text": plaintext, "ts": now}.
+        """
+        ts = int(time.time())
+        payload = json.dumps({"text": plaintext, "ts": ts}).encode()
         nonce = os.urandom(12)
-        ct    = AESGCM(sym_key).encrypt(nonce, plaintext.encode(), None)
+        ct    = AESGCM(sym_key).encrypt(nonce, payload, None)
         return base64.b64encode(nonce + ct).decode()
  
     @staticmethod
-    def decrypt_message(ciphertext_b64: str, sym_key: bytes) -> str | None:
-        """Decifra um blob base64(nonce + ciphertext). Devolve None se falhar."""
+    def decrypt_message(ciphertext_b64: str, sym_key: bytes) -> tuple[str, int] | None:
+        """Decifra um blob base64(nonce + ciphertext) e devolve (text, ts).
+        Devolve None se falhar.
+        """
         try:
             raw        = base64.b64decode(ciphertext_b64)
             nonce, ct  = raw[:12], raw[12:]
-            return AESGCM(sym_key).decrypt(nonce, ct, None).decode()
+            plain = AESGCM(sym_key).decrypt(nonce, ct, None).decode()
+            obj = json.loads(plain)
+            return obj.get("text", ""), int(obj.get("ts", 0))
         except Exception:
             return None

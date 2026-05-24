@@ -178,17 +178,18 @@ class ClientController:
             sym_key = self._keystore.get_contact_key(self._username, uid)
             if sym_key:
                 for m in data.get("messages", []):
-                    if not isinstance(m, dict):
-                        continue
-                    plaintext = self._msg_store.decrypt_message(m.get("content", ""), sym_key)
-                    if plaintext is not None:
-                        sender_uid = m.get("from", uid)
-                        sender     = self._keystore.resolve_uid(self._username, sender_uid) or sender_uid
-                        self._msg_store.append_ciphered(
-                            self._username, contact,
-                            sender, plaintext,
-                            sym_key, ts=m.get("ts")
-                        )
+                        if not isinstance(m, dict):
+                            continue
+                        dec = self._msg_store.decrypt_message(m.get("content", ""), sym_key)
+                        if dec is not None:
+                            plaintext, msg_ts = dec
+                            sender_uid = m.get("from", uid)
+                            sender     = self._keystore.resolve_uid(self._username, sender_uid) or sender_uid
+                            self._msg_store.append_ciphered(
+                                self._username, contact,
+                                sender, plaintext,
+                                sym_key, ts=msg_ts
+                            )
 
         sym_key = self._keystore.get_contact_key(self._username, uid)
         if not sym_key:
@@ -218,11 +219,13 @@ class ClientController:
                             self._username, contact_uid
                         )
                         if sym_key:
-                            username_claro = self._msg_store.decrypt_message(enc_username, sym_key)
-                            if username_claro:
-                                self._keystore.save_contact_username(
-                                    self._username, contact_uid, username_claro
-                                )
+                                decu = self._msg_store.decrypt_message(enc_username, sym_key)
+                                if decu is not None:
+                                    username_claro = decu[0]
+                                    if username_claro:
+                                        self._keystore.save_contact_username(
+                                            self._username, contact_uid, username_claro
+                                        )
                 elif key_type == "owner":
                     self._keystore.receive_owner_key(
                         self._username, contact_uid, blob
@@ -370,13 +373,14 @@ class ClientController:
             for m in data.get("messages", []):
                 if not isinstance(m, dict):
                     continue
-                plaintext = self._msg_store.decrypt_message(m.get("content", ""), group_key)
-                if plaintext is not None:
+                dec = self._msg_store.decrypt_message(m.get("content", ""), group_key)
+                if dec is not None:
+                    plaintext, msg_ts = dec
                     sender_uid = m.get("from", "?")
                     sender = self._keystore.resolve_uid(self._username, sender_uid) or sender_uid
                     self._msg_store.append_ciphered(
                         self._username, f"grp_{group_id}",
-                        sender, plaintext, group_key, ts=m.get("ts")
+                        sender, plaintext, group_key, ts=msg_ts
                     )
         return self._msg_store.load_all(self._username, f"grp_{group_id}", group_key)
 

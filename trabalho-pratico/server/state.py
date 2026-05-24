@@ -178,7 +178,7 @@ class ServerState:
             if not content:
                 return False, "ERRO mensagem vazia."
             self._offline[recipient].append({
-                "from": sender, "content": content, "ts": int(time.time()),
+                "from": sender, "content": content,
             })
             self._persist_locked()
             return True, "OK mensagem enfileirada."

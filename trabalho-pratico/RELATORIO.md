@@ -56,7 +56,7 @@ A comunicação TCP usa *length-prefixed framing*: cada mensagem é precedida de
 
 ### 3.1 Handshake e Estabelecimento do Canal Seguro
 
-O handshake é executado em cada nova ligação TCP e autentica o servidor perante o cliente:
+O handshake é executado em cada nova ligação TCP e autentica o servidor perante o cliente através de chaves estáticas:
 
 ```
 Cliente                                    Servidor
@@ -75,9 +75,9 @@ Cliente                                    Servidor
   session_key = HKDF-SHA256(shared, info="chat-session-key")
 ```
 
-O cliente verifica a assinatura Ed25519 do servidor sobre a sua chave efémera X25519. Na primeira ligação, a `signing_pub` é aceite e guardada (*Trust On First Use*); nas ligações seguintes, é comparada com a versão guardada — qualquer divergência é tratada como possível ataque MITM e a ligação é terminada.
+O cliente verifica a assinatura Ed25519 do servidor sobre a sua chave X25519. Na primeira ligação, a `signing_pub` é aceite e guardada (*Trust On First Use*); nas ligações seguintes, é comparada com a versão guardada — qualquer divergência é tratada como possível ataque MITM e a ligação é terminada.
 
-A chave de sessão `session_key` é derivada via HKDF-SHA256 sobre o segredo partilhado X25519 e usada para cifrar todas as mensagens subsequentes com AES-256-GCM (nonce aleatório de 12 bytes por mensagem).
+A chave de sessão `session_key` é derivada via HKDF-SHA256 sobre o segredo partilhado X25519 estático e usada para cifrar todas as mensagens subsequentes com AES-256-GCM (nonce aleatório de 12 bytes por mensagem).
 
 ### 3.2 Registo
 
@@ -302,15 +302,15 @@ O sistema foi desenhado considerando dois adversários distintos:
 
 ### 5.4 Limitações Conhecidas
 
-**Forward secrecy parcial:** A chave de sessão do canal (por ligação) usa ECDH efémero, pelo que é renovada em cada ligação. No entanto, as chaves E2EE de contacto (`sym_key`) são estáticas ao longo de toda a relação — se forem comprometidas no futuro, todas as mensagens passadas cifradas com essa chave ficam expostas. Forward secrecy completa exigiria rotação periódica das chaves de contacto (ex.: protocolo Double Ratchet).
-
 **Rotação de chave de grupo na remoção de membro:** Quando um membro é removido de um grupo, a chave de grupo não é rotacionada. Um membro removido que tenha guardado a chave localmente continua a ser capaz de decifrar mensagens futuras se as obtiver por outros meios (o servidor já não lhas entrega, mas o risco permanece). Key rotation requereria que o administrador cifrasse uma nova chave para todos os membros restantes, implicando N operações GET_PUB_KEY — uma melhoria identificada mas não implementada.
 
 **Estado do servidor não cifrado:** O ficheiro `server_state.json` contém em plaintext o grafo de contactos entre utilizadores (UIDs), as listas de membros de grupos e os metadados de certificados. Um atacante com acesso ao disco do servidor pode inferir relações sociais, ainda que não consiga ler o conteúdo das mensagens. Cifrar o estado do servidor comprometeria a capacidade do servidor de processar pedidos, pelo que uma solução real exigiria uma base de dados com cifra ao nível das colunas ou um modelo de servidor oblivious.
 
 **Sessão única por utilizador:** O servidor recusa uma segunda ligação para o mesmo UID enquanto a primeira está ativa. Múltiplos dispositivos simultâneos não são suportados.
 
-**Sem verificação de revogação de certificados:** Não existe mecanismo de CRL (Certificate Revocation List) ou OCSP. Se a chave privada X25519 de um utilizador for comprometida, o servidor não tem forma de invalidar o certificado existente sem intervenção manual.
+**Sem revogação de certificados:** Não existe mecanismo de CRL (Certificate Revocation List) ou OCSP. Se a chave privada X25519 de um utilizador for comprometida, o servidor não tem forma de invalidar o certificado existente sem intervenção manual.
+
+**Fetch de Mensagens Não Otimizado**: A operação FETCH_MESSAGES carece de otimização, pois descarrega sempre a totalidade do buffer disponível sem filtrar apenas o que ainda não foi lido pelo cliente. Para solucionar esta limitação, seria necessária a introdução de um sistema de IDs únicos por mensagem (Message IDs) e o controlo do estado de leitura.
 
 **Ausência de limite de tentativas de login:** O servidor não implementa rate limiting nas tentativas de autenticação, o que torna o sistema vulnerável a ataques de força bruta sobre passwords.
 
@@ -327,7 +327,7 @@ O servidor armazena mensagens destinadas a utilizadores não ligados numa fila p
 O servidor funciona como CA self-signed usando Ed25519. No arranque, gera (ou carrega) um par de chaves de longa duração armazenado em `server/data/server_signing.pem`. No registo de cada utilizador, a CA emite um certificado digital:
 
 ```json
-{ "issued_at": <unix timestamp>, "pub_key": "<base64 X25519>", "uid": "<sha256 hex>" }
+{ "pub_key": "<base64 X25519>", "uid": "<sha256 hex>" }
 ```
 
 O JSON é serializado de forma canónica (chaves ordenadas lexicograficamente, sem espaços) para garantir que a assinatura é determinística e não depende da ordem de serialização. O certificado é armazenado no servidor e devolvido juntamente com a chave pública em resposta a pedidos `GET_PUB_KEY`.
@@ -341,10 +341,6 @@ Os grupos têm um identificador único (UUID4 hex), um nome, um administrador e 
 ---
 
 ## 7. Funcionalidades Não Implementadas
-
-**Forward Secrecy completa (Double Ratchet):** Uma implementação completa exigiria a adopção de um protocolo de ratchet (semelhante ao Signal Protocol), com geração de novas chaves de sessão por mensagem e possibilidade de healing após comprometimento de uma chave. A arquitetura atual de chave simétrica estática por par de contactos não suporta isso sem alterações profundas ao modelo de dados e ao protocolo de handshake.
-
-**Modo Descentralizado (PGP-like / P2P):** A arquitetura atual é intrinsecamente centralizada — o servidor é o único ponto de encontro entre clientes. Um modo P2P exigiria mecanismos de descoberta de endereços (ex.: NAT traversal, servidor de sinalização separado) e um protocolo de handshake direto entre clientes, representando uma mudança arquitetural significativa.
 
 **Rotação de chave de grupo na remoção de membro:** Como descrito na secção de limitações, a remoção de um membro não rota a chave de grupo. Uma implementação correta desta feature requereria que o administrador obtivesse as chaves públicas de todos os membros restantes e re-cifrasse uma nova chave de grupo para cada um, o que implica N chamadas `GET_PUB_KEY` e distribui a carga para o cliente administrador.
 
