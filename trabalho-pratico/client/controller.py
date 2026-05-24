@@ -457,10 +457,12 @@ class ClientController:
                     if enc_username:
                         sym_key = self._keystore.get_contact_key(self._username, contact_uid)
                         if sym_key:
-                            username_claro = self._msg_store.decrypt_message(enc_username, sym_key)
-                            if username_claro:
-                                self._keystore.save_contact_username(
-                                    self._username, contact_uid, username_claro)
+                            dec = self._msg_store.decrypt_message(enc_username, sym_key)
+                            if dec is not None:
+                                username_claro, _ = dec
+                                if username_claro:
+                                    self._keystore.save_contact_username(
+                                        self._username, contact_uid, username_claro)
                 elif key_type == "owner":
                     self._keystore.receive_owner_key(self._username, contact_uid, blob)
             except Exception as e:
